@@ -48,6 +48,10 @@ export interface Settings {
   zoomEffect: boolean;
   tailPadding: number; // seconds of silence after the voice
 
+  /* ---- intro title card ---- */
+  introOn: boolean;
+  introDuration: number; // total seconds, including flight in/out
+
   /* ---- audio ---- */
   voiceVolume: number; // 0 … 1.4
   musicVolume: number; // 0 … 0.5
@@ -91,6 +95,9 @@ export const DEFAULT_SETTINGS: Settings = {
   zoomEffect: false,
   tailPadding: 0.6,
 
+  introOn: true,
+  introDuration: 3.5,
+
   voiceVolume: 1,
   musicVolume: 0.13,
   musicFade: true,
@@ -106,7 +113,9 @@ export function loadSettings(): Settings {
   try {
     const raw = localStorage.getItem(STORE_KEY);
     if (!raw) return { ...DEFAULT_SETTINGS };
-    return { ...DEFAULT_SETTINGS, ...(JSON.parse(raw) as Partial<Settings>) };
+    const settings = { ...DEFAULT_SETTINGS, ...(JSON.parse(raw) as Partial<Settings>) };
+    settings.introDuration = Math.max(1, Math.min(12, Number(settings.introDuration) || 3.5));
+    return settings;
   } catch {
     return { ...DEFAULT_SETTINGS };
   }

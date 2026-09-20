@@ -1,18 +1,8 @@
-/**
- * Social Media Scheduling Client & Europe/Berlin Slot Engine
- *
- * Manages:
- *   - Persistent scheduled posts list (synchronized between /api/zernio and localStorage)
- *   - Intelligent slot selection in Europe/Berlin timezone (06:00 & 20:00)
- *   - Scheduling 10 posts across the next 5 free days
- *   - Support for TikTok, Instagram, YouTube Shorts (and custom platforms)
- *   - Retry failed posts ("Erneut versuchen") & delete posts
- */
-
-export type SocialPlatform = "tiktok" | "instagram" | "youtube";
-
-export type PostStatus = "Geplant" | "Wird veröffentlicht" | "Veröffentlicht" | "Fehler";
-
+import { DEFAULT_DESCRIPTION, validateVideoUrl } from '../../shared/buffer.js';
+export { DEFAULT_DESCRIPTION, validateVideoUrl };
+export type SocialPlatform = 'tiktok' | 'instagram' | 'youtube';
+export type PostStatus = 'Geplant' | 'Wird veröffentlicht' | 'Veröffentlicht' | 'Fehler' | 'Unklar';
+export type ScheduleMode = 'queue' | 'now' | 'auto' | 'custom';
 export interface ScheduledPost {
   id: string;
   videoUrl: string;
@@ -21,77 +11,50 @@ export interface ScheduledPost {
   description: string;
   hashtags: string[];
   platform: SocialPlatform;
-  scheduledAt: string; // ISO UTC string
-  berlinSlotKey?: string; // "YYYY-MM-DD HH:mm" in Europe/Berlin
+  channelId: string;
+  mode: ScheduleMode;
+  scheduledAt: string;
+  berlinSlotKey?: string;
   status: PostStatus;
-  zernioPostId?: string | null;
+  bufferPostId?: string | null;
   errorMessage?: string | null;
   createdAt: string;
   updatedAt: string;
 }
-
-export interface ZernioConfigState {
+export interface BufferConfigState {
   defaultPlatforms: SocialPlatform[];
-  tiktokAccountId: string;
-  instagramAccountId: string;
-  youtubeAccountId: string;
-  defaultHashtags: string;
-  simulateErrorOnNextPost?: boolean;
+  tiktokChannelId: string;
+  instagramChannelId: string;
+  youtubeChannelId: string;
+  sendInterval: number;
 }
-
-const POSTS_STORAGE_KEY = "shortsfactory.scheduled_posts.v1";
-const ZERNIO_CFG_KEY = "shortsfactory.zernio_config.v1";
-
-export const DEFAULT_ZERNIO_CONFIG: ZernioConfigState = {
-  defaultPlatforms: ["tiktok", "instagram", "youtube"],
-  tiktokAccountId: "",
-  instagramAccountId: "",
-  youtubeAccountId: "",
-  defaultHashtags: "#shorts #viral #redditstories #storytime #fyp",
-  simulateErrorOnNextPost: false,
+const POSTS_KEY = 'shortsfactory.buffer_posts.v1'; // Never treat legacy simulated posts as real Buffer posts.
+const CONFIG_KEY = 'shortsfactory.buffer_config.v1';
+const DEFAULT_CONFIG: BufferConfigState = {
+  defaultPlatforms: ['tiktok'], tiktokChannelId: '', instagramChannelId: '', youtubeChannelId: '', sendInterval: 3,
 };
-
-export function loadZernioConfig(): ZernioConfigState {
-  try {
-    const raw = localStorage.getItem(ZERNIO_CFG_KEY);
-    if (!raw) return { ...DEFAULT_ZERNIO_CONFIG };
-    return { ...DEFAULT_ZERNIO_CONFIG, ...JSON.parse(raw) };
-  } catch {
-    return { ...DEFAULT_ZERNIO_CONFIG };
-  }
+export function loadBufferConfig(): BufferConfigState {
+  try { return { ...DEFAULT_CONFIG, ...JSON.parse(localStorage.getItem(CONFIG_KEY) || '{}') }; }
+  catch { return { ...DEFAULT_CONFIG }; }
 }
-
-export function saveZernioConfig(cfg: ZernioConfigState): void {
-  try {
-    localStorage.setItem(ZERNIO_CFG_KEY, JSON.stringify(cfg));
-  } catch {
-    /* ignore */
-  }
+export function saveBufferConfig(config: BufferConfigState) {
+  try { localStorage.setItem(CONFIG_KEY, JSON.stringify(config)); } catch { /* private mode */ }
 }
-
 export function loadLocalPosts(): ScheduledPost[] {
-  try {
-    const raw = localStorage.getItem(POSTS_STORAGE_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed : [];
-  } catch {
-    return [];
-  }
+  try { const value = JSON.parse(localStorage.getItem(POSTS_KEY) || '[]'); return Array.isArray(value) ? value : []; }
+  catch { return []; }
 }
-
-export function saveLocalPosts(posts: ScheduledPost[]): void {
-  try {
-    localStorage.setItem(POSTS_STORAGE_KEY, JSON.stringify(posts));
-  } catch {
-    /* ignore */
-  }
+export function saveLocalPosts(posts: ScheduledPost[]) {
+  // Fail closed before publishing if the journal cannot be saved (duplicate protection).
+  localStorage.setItem(POSTS_KEY, JSON.stringify(posts));
 }
-
-/* ------------------------------------------------------------------ */
-/*  Europe/Berlin Timezone Formatting & Slot Helper                    */
-/* ------------------------------------------------------------------ */
-
+export interface SchedulePlanOptions {
+  mode: ScheduleMode;
+  count?: number;
+  times?: string[];
+  startDate?: string;
+  dayStep?: number;
+}
 export function getBerlinParts(date: Date = new Date()) {
   const formatter = new Intl.DateTimeFormat("en-CA", {
     timeZone: "Europe/Berlin",
@@ -124,16 +87,16 @@ export function berlinWallTimeToISO(
   hour: number,
   minute = 0
 ): string {
-  const approxUTC = new Date(Date.UTC(year, month - 1, day, hour, minute, 0));
-  const berlin = getBerlinParts(approxUTC);
-  const desiredMinutes = hour * 60 + minute;
-  const actualMinutes = berlin.hour * 60 + berlin.minute;
-  let diffMinutes = desiredMinutes - actualMinutes;
-  if (diffMinutes > 720) diffMinutes -= 1440;
-  if (diffMinutes < -720) diffMinutes += 1440;
-
-  const exactUTC = new Date(approxUTC.getTime() + diffMinutes * 60 * 1000);
-  return exactUTC.toISOString();
+  const desired = Date.UTC(year, month - 1, day, hour, minute);
+  let utc = desired;
+  for (let i = 0; i < 4; i++) {
+    const p = getBerlinParts(new Date(utc));
+    const actual = Date.UTC(p.year, p.month - 1, p.day, p.hour, p.minute);
+    if (actual === desired) return new Date(utc).toISOString();
+    utc += desired - actual;
+  }
+  // Nonexistent wall time during the spring DST jump: skip it, never silently shift it.
+  return "";
 }
 
 export function getBerlinSlotKey(isoString: string): string {
@@ -211,7 +174,7 @@ export function findNextFreeBerlinSlots(
       const slotISO = berlinWallTimeToISO(bDay.year, bDay.month, bDay.day, hour, 0);
       const slotDate = new Date(slotISO);
 
-      if (slotDate.getTime() <= now.getTime() + 2 * 60 * 1000) {
+      if (!slotISO || slotDate.getTime() <= now.getTime() + 2 * 60 * 1000) {
         continue;
       }
 
@@ -229,60 +192,6 @@ export function findNextFreeBerlinSlots(
   }
 
   return slots;
-}
-
-/* ------------------------------------------------------------------ */
-/*  API & Local Fallback Operations                                    */
-/* ------------------------------------------------------------------ */
-
-export async function fetchScheduledPosts(): Promise<{
-  posts: ScheduledPost[];
-  hasApiKey: boolean;
-}> {
-  const local = loadLocalPosts();
-  try {
-    const res = await fetch("/api/zernio", { method: "GET" });
-    if (res.ok) {
-      const data = await res.json();
-      if (Array.isArray(data?.posts)) {
-        // Merge server and local posts by ID
-        const map = new Map<string, ScheduledPost>();
-        for (const p of local) map.set(p.id, p);
-        for (const p of data.posts) map.set(p.id, p);
-        const merged = Array.from(map.values()).sort(
-          (a, b) => new Date(a.scheduledAt).getTime() - new Date(b.scheduledAt).getTime()
-        );
-        saveLocalPosts(merged);
-        return { posts: merged, hasApiKey: Boolean(data.hasApiKey) };
-      }
-    }
-  } catch {
-    /* fallback to local storage if backend route is unreachable */
-  }
-  return { posts: local, hasApiKey: false };
-}
-
-export interface ScheduleBatchInputItem {
-  videoUrl: string;
-  thumbnailUrl?: string;
-  title: string;
-  description: string;
-  hashtags: string[];
-}
-
-/** How the user wants the batch to go out. */
-export type ScheduleMode = "now" | "auto" | "custom";
-
-export interface SchedulePlanOptions {
-  mode: ScheduleMode;
-  /** how many posts to create (default 10) */
-  count?: number;
-  /** custom mode: daily times in Berlin wall-clock, e.g. ["06:00","20:00"] */
-  times?: string[];
-  /** custom mode: first day to schedule on, "YYYY-MM-DD" (Berlin) */
-  startDate?: string;
-  /** custom mode: only schedule every N-th day (1 = daily) */
-  dayStep?: number;
 }
 
 /** Parse "HH:mm" → [hour, minute]; invalid input falls back to 06:00. */
@@ -304,7 +213,7 @@ export function findFlexibleBerlinSlots(
   opts: SchedulePlanOptions
 ): { scheduledAt: string; berlinKey: string }[] {
   const count = opts.count ?? 10;
-  const times = (opts.times?.length ? opts.times : ["06:00", "20:00"]).map(parseTime);
+  const times = (opts.times?.length ? opts.times : ["06:00", "20:00"]).map(parseTime).sort((a, b) => a[0] * 60 + a[1] - b[0] * 60 - b[1]);
   const dayStep = Math.max(1, opts.dayStep ?? 1);
 
   const occupied = new Set(
@@ -337,7 +246,7 @@ export function findFlexibleBerlinSlots(
     for (const [hour, minute] of times) {
       if (slots.length >= count) break;
       const iso = berlinWallTimeToISO(bDay.year, bDay.month, bDay.day, hour, minute);
-      if (new Date(iso).getTime() <= now.getTime() + 2 * 60 * 1000) continue;
+      if (!iso || new Date(iso).getTime() <= now.getTime() + 2 * 60 * 1000) continue;
       const key = getBerlinSlotKey(iso);
       if (occupied.has(key)) continue;
       occupied.add(key);
@@ -349,208 +258,167 @@ export function findFlexibleBerlinSlots(
   return slots;
 }
 
-/** Immediate publishing: stagger slightly so platforms don't rate-limit. */
-export function buildImmediateSlots(
-  count: number
-): { scheduledAt: string; berlinKey: string }[] {
-  const out: { scheduledAt: string; berlinKey: string }[] = [];
-  for (let i = 0; i < count; i++) {
-    const iso = new Date(Date.now() + (i * 90 + 60) * 1000).toISOString();
-    out.push({ scheduledAt: iso, berlinKey: getBerlinSlotKey(iso) });
-  }
-  return out;
-}
-
-export function planSlots(
-  existingPosts: ScheduledPost[],
-  opts: SchedulePlanOptions
-): { scheduledAt: string; berlinKey: string }[] {
-  const count = opts.count ?? 10;
-  if (opts.mode === "now") return buildImmediateSlots(count);
+export function planSlots(existingPosts: ScheduledPost[], opts: SchedulePlanOptions) {
+  if (opts.mode === "now" || opts.mode === "queue") return [];
   if (opts.mode === "custom") return findFlexibleBerlinSlots(existingPosts, opts);
-  return findNextFreeBerlinSlots(existingPosts, count);
+  return findNextFreeBerlinSlots(existingPosts, opts.count ?? 10);
 }
 
-export async function scheduleBatchTenPosts(opts: {
-  items: ScheduleBatchInputItem[];
-  config: ZernioConfigState;
-  plan?: SchedulePlanOptions;
-}): Promise<{
-  createdPosts: ScheduledPost[];
-  allPosts: ScheduledPost[];
-  hasApiKey: boolean;
-}> {
-  const current = loadLocalPosts();
-  const plan: SchedulePlanOptions = opts.plan ?? { mode: "auto", count: 10 };
-  const count = plan.count ?? 10;
-  const platforms =
-    opts.config.defaultPlatforms.length > 0
-      ? opts.config.defaultPlatforms
-      : (["tiktok", "instagram", "youtube"] as SocialPlatform[]);
-
-  try {
-    const res = await fetch("/api/zernio", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        action: "schedule-batch",
-        clientPosts: current,
-        videos: opts.items,
-        platforms,
-        plan,
-        accountIds: {
-          tiktok: opts.config.tiktokAccountId,
-          instagram: opts.config.instagramAccountId,
-          youtube: opts.config.youtubeAccountId,
-        },
-      }),
-    });
-
-    if (res.ok) {
-      const data = await res.json();
-      if (data?.ok && Array.isArray(data.posts)) {
-        // If user enabled error simulation for testing Zernio failure handling:
-        let finalPosts: ScheduledPost[] = data.posts;
-        if (opts.config.simulateErrorOnNextPost && data.createdPosts?.length > 0) {
-          const targetId = data.createdPosts[0].id;
-          finalPosts = finalPosts.map((p) =>
-            p.id === targetId
-              ? {
-                  ...p,
-                  status: "Fehler",
-                  errorMessage:
-                    "Zernio API Ablehnung: Ungültiges OAuth-Token oder Rate-Limit für diesen Kanal erreicht. Bitte erneut versuchen.",
-                }
-              : p
-          );
-        }
-        saveLocalPosts(finalPosts);
-        return {
-          createdPosts: data.createdPosts || [],
-          allPosts: finalPosts,
-          hasApiKey: Boolean(data.hasApiKey),
-        };
-      }
-    }
-  } catch {
-    /* fallback to local slot engine if serverless function is offline */
-  }
-
-  // Pure local fallback — same Europe/Berlin engine, honouring the chosen plan
-  const freeSlots = planSlots(current, plan);
-  const nowIso = new Date().toISOString();
-  const createdPosts: ScheduledPost[] = [];
-
-  for (let i = 0; i < count; i++) {
-    const slot = freeSlots[i];
-    if (!slot) break;
-    const item = opts.items[i % Math.max(1, opts.items.length)];
-    const platform = platforms[i % platforms.length];
-    const isSimulatedErr = opts.config.simulateErrorOnNextPost && i === 0;
-
-    const newPost: ScheduledPost = {
-      id: `post_${Date.now()}_${i}_${Math.random().toString(36).slice(2, 7)}`,
-      videoUrl: item?.videoUrl || "",
-      thumbnailUrl: item?.thumbnailUrl || "",
-      title: item?.title || `Short Story #${i + 1}`,
-      description: item?.description || "Automatisch geplant über ShortsFactory & Zernio API.",
-      hashtags: item?.hashtags || ["#shorts", "#viral", "#redditstories"],
-      platform,
-      scheduledAt: slot.scheduledAt,
-      berlinSlotKey: slot.berlinKey,
-      status: isSimulatedErr
-        ? "Fehler"
-        : plan.mode === "now"
-          ? "Wird veröffentlicht"
-          : "Geplant",
-      zernioPostId: isSimulatedErr ? null : `zernio_${Date.now()}_${i}`,
-      errorMessage: isSimulatedErr
-        ? "Zernio API Fehler: Verbindung zu Zielkanal temporär abgelehnt."
-        : null,
-      createdAt: nowIso,
-      updatedAt: nowIso,
-    };
-    createdPosts.push(newPost);
-  }
-
-  const allPosts = [...current, ...createdPosts].sort(
-    (a, b) => new Date(a.scheduledAt).getTime() - new Date(b.scheduledAt).getTime()
-  );
-  saveLocalPosts(allPosts);
-
-  return {
-    createdPosts,
-    allPosts,
-    hasApiKey: false,
-  };
+export class BufferRequestError extends Error {
+  constructor(message: string, public uncertain = false, public status = 0) { super(message); }
 }
-
-export async function retryScheduledPost(postId: string): Promise<ScheduledPost[]> {
-  const current = loadLocalPosts();
+export async function bufferRequest<T>(body: object): Promise<T> {
+  let res: Response;
   try {
-    const res = await fetch("/api/zernio", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        action: "retry-post",
-        postId,
-        clientPosts: current,
-      }),
+    res = await fetch('/api/buffer', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+      signal: AbortSignal.timeout(55000),
     });
-    if (res.ok) {
-      const data = await res.json();
-      if (Array.isArray(data?.posts)) {
-        saveLocalPosts(data.posts);
-        return data.posts;
-      }
-    }
-  } catch {
-    /* fallback below */
+  } catch { throw new BufferRequestError('Verbindung unterbrochen. Ergebnis in Buffer prüfen; nicht blind erneut senden.', true); }
+  const data = await res.json().catch(() => null);
+  if (!res.ok || !data) throw new BufferRequestError(data?.error || `Buffer HTTP ${res.status}`, data?.uncertain ?? true, res.status);
+  return data as T;
+}
+export interface BufferChannel { id: string; name: string; displayName: string; service: string; isQueuePaused: boolean; organizationName: string }
+export const fetchBufferChannels = () => bufferRequest<{ channels: BufferChannel[] }>({ action: 'channels' });
+interface RemotePost { id: string; dueAt: string | null; status: string }
+function remotePatch(post: RemotePost, fallback: string): Pick<ScheduledPost, 'status' | 'bufferPostId' | 'scheduledAt' | 'updatedAt'> {
+  const status: PostStatus = post.status === 'sent' ? 'Veröffentlicht'
+    : post.status === 'sending' ? 'Wird veröffentlicht'
+    : post.status === 'error' ? 'Fehler'
+    : post.status === 'scheduled' ? 'Geplant' : 'Unklar';
+  return { status, bufferPostId: post.id, scheduledAt: post.dueAt || fallback, updatedAt: new Date().toISOString() };
+}
+export async function fetchScheduledPosts(): Promise<{ posts: ScheduledPost[]; hasApiKey: boolean }> {
+  const posts = loadLocalPosts();
+  const res = await fetch('/api/buffer');
+  if (!res.ok) throw new Error('Buffer-Backend nicht erreichbar.');
+  const { hasApiKey } = await res.json();
+  if (!hasApiKey) return { posts, hasApiKey: false };
+  const ids = posts.flatMap(p => p.bufferPostId ? [p.bufferPostId] : []);
+  const remote: RemotePost[] = [];
+  for (let i = 0; i < ids.length; i += 40) {
+    const data = await bufferRequest<{ posts: RemotePost[] }>({ action: 'status', ids: ids.slice(i, i + 40) });
+    remote.push(...data.posts.filter(Boolean));
   }
-
-  const nextSlot = findNextFreeBerlinSlots(current, 1)[0];
-  const updated = current.map((p) => {
-    if (p.id !== postId) return p;
-    const isPast = new Date(p.scheduledAt).getTime() <= Date.now() + 60_000;
-    const newSched = isPast && nextSlot ? nextSlot.scheduledAt : p.scheduledAt;
-    return {
-      ...p,
-      status: "Geplant" as PostStatus,
-      scheduledAt: newSched,
-      berlinSlotKey: getBerlinSlotKey(newSched),
-      errorMessage: null,
-      zernioPostId: p.zernioPostId || `zernio_retry_${Date.now()}`,
-      updatedAt: new Date().toISOString(),
-    };
+  const updated = posts.map(p => {
+    const match = remote.find(r => r.id === p.bufferPostId);
+    return match ? { ...p, ...remotePatch(match, p.scheduledAt) } : p;
   });
   saveLocalPosts(updated);
-  return updated;
+  return { posts: updated, hasApiKey: true };
+}
+export interface ScheduleBatchInputItem { videoUrl: string; title: string; description: string }
+export interface DispatchProgress { completed: number; total: number; message: string }
+let dispatching = false;
+
+export async function scheduleBatchPosts(opts: {
+  items: ScheduleBatchInputItem[];
+  config: BufferConfigState;
+  plan: SchedulePlanOptions;
+  onProgress?: (progress: DispatchProgress) => void;
+  onPostsChange?: (posts: ScheduledPost[]) => void;
+  signal?: AbortSignal;
+}) {
+  if (dispatching) throw new Error('Ein Versand läuft bereits.');
+  const platforms = [...new Set(opts.config.defaultPlatforms)];
+  if (!opts.items.length || !platforms.length) throw new Error('Videos und mindestens einen Kanal auswählen.');
+  for (const item of opts.items) {
+    const error = validateVideoUrl(item.videoUrl);
+    if (error) throw new Error(error);
+  }
+  for (const platform of platforms) {
+    if (!opts.config[`${platform}ChannelId`]?.trim()) throw new Error(`Bitte den Buffer-Kanal für ${platform} auswählen.`);
+  }
+  const current = loadLocalPosts();
+  const slots = planSlots(current, { ...opts.plan, count: opts.items.length });
+  if (['auto', 'custom'].includes(opts.plan.mode) && slots.length !== opts.items.length) throw new Error('Nicht genügend gültige Zeitfenster.');
+  const jobs = opts.items.flatMap((item, i) => platforms.map(platform => ({
+    ...item, platform, channelId: opts.config[`${platform}ChannelId`].trim(), scheduledAt: slots[i]?.scheduledAt,
+  })));
+  const seen = new Set(current.filter(p => p.status !== 'Fehler' || p.bufferPostId).map(p => `${p.videoUrl}\n${p.channelId}`));
+  for (const job of jobs) {
+    const key = `${job.videoUrl}\n${job.channelId}`;
+    if (seen.has(key)) throw new Error('Dieser Video-Link wurde für einen ausgewählten Kanal bereits verwendet. Bitte Kalender / Buffer prüfen.');
+    seen.add(key);
+  }
+  const interval = Math.max(2, Math.min(60, Number(opts.config.sendInterval) || 3)) * 1000;
+  const createdPosts: ScheduledPost[] = [];
+  dispatching = true;
+  try {
+    for (let i = 0; i < jobs.length; i++) {
+      if (opts.signal?.aborted) break;
+      if (i > 0) {
+        opts.onProgress?.({ completed: i, total: jobs.length, message: `${interval / 1000}s Pause vor dem nächsten Video …` });
+        await new Promise<void>(resolve => {
+          const finish = () => { clearTimeout(timer); opts.signal?.removeEventListener('abort', finish); resolve(); };
+          const timer = setTimeout(finish, interval);
+          opts.signal?.addEventListener('abort', finish, { once: true });
+        });
+      }
+      if (opts.signal?.aborted) break;
+      const now = new Date().toISOString();
+      const job = jobs[i];
+      const post: ScheduledPost = {
+        ...job, id: crypto.randomUUID(), mode: opts.plan.mode, hashtags: [],
+        scheduledAt: job.scheduledAt || now, status: 'Unklar', createdAt: now, updatedAt: now,
+        errorMessage: 'Versand gestartet. Bei Unterbrechung zuerst in Buffer prüfen.',
+      };
+      current.push(post);
+      saveLocalPosts(current); // write-ahead journal survives tab close / reload
+      opts.onProgress?.({ completed: i, total: jobs.length, message: `${i + 1}/${jobs.length} → ${job.platform}: ${job.title}` });
+      let stop = false;
+      try {
+        const data = await bufferRequest<{ post: RemotePost }>({ action: 'create', post });
+        if (!data.post?.id) throw new BufferRequestError('Keine bestätigte Post-ID.', true);
+        Object.assign(post, remotePatch(data.post, post.scheduledAt), { errorMessage: null });
+      } catch (error) {
+        const e = error as BufferRequestError;
+        post.status = e.uncertain ? 'Unklar' : 'Fehler';
+        post.errorMessage = e.message;
+        stop = e.uncertain || [429, 503].includes(e.status);
+      }
+      createdPosts.push(post);
+      saveLocalPosts(current);
+      opts.onPostsChange?.([...current]);
+      opts.onProgress?.({ completed: i + 1, total: jobs.length, message: post.errorMessage || 'Von Buffer bestätigt' });
+      if (stop) break;
+    }
+    return { createdPosts, allPosts: current };
+  } finally { dispatching = false; }
 }
 
-export async function deleteScheduledPost(postId: string): Promise<ScheduledPost[]> {
+export async function retryScheduledPost(postId: string) {
   const current = loadLocalPosts();
+  const post = current.find(p => p.id === postId);
+  if (!post || post.status !== 'Fehler' || post.bufferPostId) throw new Error('Bitte diesen Post direkt in Buffer prüfen / erneut planen. Kein automatisches Duplikat wird erstellt.');
+  if (dispatching) throw new Error('Ein Versand läuft bereits.');
+  dispatching = true;
   try {
-    const res = await fetch("/api/zernio", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        action: "delete-post",
-        postId,
-        clientPosts: current,
-      }),
-    });
-    if (res.ok) {
-      const data = await res.json();
-      if (Array.isArray(data?.posts)) {
-        saveLocalPosts(data.posts);
-        return data.posts;
-      }
+    if (['auto', 'custom'].includes(post.mode) && Date.parse(post.scheduledAt) <= Date.now()) {
+      post.scheduledAt = findNextFreeBerlinSlots(current, 1)[0].scheduledAt;
     }
-  } catch {
-    /* fallback below */
-  }
-
-  const updated = current.filter((p) => p.id !== postId);
+    post.status = 'Unklar';
+    saveLocalPosts(current);
+    try {
+      const data = await bufferRequest<{ post: RemotePost }>({ action: 'create', post });
+      if (!data.post?.id) throw new BufferRequestError('Keine bestätigte Post-ID.', true);
+      Object.assign(post, remotePatch(data.post, post.scheduledAt), { errorMessage: null });
+    } catch (error) {
+      const e = error as BufferRequestError;
+      post.status = e.uncertain ? 'Unklar' : 'Fehler'; post.errorMessage = e.message;
+    }
+    saveLocalPosts(current);
+    return current;
+  } finally { dispatching = false; }
+}
+export async function deleteScheduledPost(postId: string) {
+  const current = loadLocalPosts();
+  const post = current.find(p => p.id === postId);
+  if (!post) return current;
+  if (post.status === 'Unklar' && !post.bufferPostId) throw new Error('Versandergebnis unklar. Bitte zuerst in Buffer prüfen. Der lokale Schutz vor Duplikaten bleibt erhalten.');
+  if (post.bufferPostId) await bufferRequest({ action: 'delete', id: post.bufferPostId });
+  const updated = current.filter(p => p.id !== postId);
   saveLocalPosts(updated);
   return updated;
 }

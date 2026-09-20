@@ -6,9 +6,11 @@
 
 import { buildCues, cueAt, type Cue, type WordTs } from "./tts";
 import type { Settings } from "./settings";
+import { drawIntroCard } from "./intro";
 import { resolveBitrate } from "./settings";
 
 export interface RenderJobOptions {
+  title: string;
   /** object URL of the background source (file blob or fetched remote blob) */
   bgUrl: string;
   /** where inside the source this clip begins, in seconds */
@@ -201,7 +203,8 @@ export async function renderLocal(opts: RenderJobOptions): Promise<LocalRenderRe
       }
     }
 
-    const duration = Math.max(voiceBuf.duration + Math.max(0, s.tailPadding), 3);
+    const introDuration = s.introOn ? Math.max(1, Math.min(12, Number(s.introDuration) || 3.5)) : 0;
+    const duration = Math.max(voiceBuf.duration + Math.max(0, s.tailPadding), introDuration, 3);
     const cues: Cue[] = s.captionsOn
       ? buildCues(opts.words, voiceBuf.duration + 0.4, s.wordsPerCue)
       : [];
@@ -274,8 +277,9 @@ export async function renderLocal(opts: RenderJobOptions): Promise<LocalRenderRe
       }
       if (s.captionsOn) {
         const cue = cueAt(cues, t);
-        if (cue) drawCaption(ctx, cue.text, w, h, s);
+        if (cue) drawCaption(ctx, cue.text, w, h, introDuration > t ? { ...s, captionY: Math.max(0.74, s.captionY) } : s);
       }
+      if (s.introOn) drawIntroCard(ctx, opts.title, w, h, t, introDuration);
     };
 
     let raf = 0;
