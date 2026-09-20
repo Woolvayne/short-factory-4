@@ -9,23 +9,23 @@ import {
   Globe,
   RotateCw,
   Settings as SettingsIcon,
-  ShieldCheck,
   Trash2,
   X,
 } from "lucide-react";
+import BufferChannels from "./BufferChannels";
 import { cn } from "../utils/cn";
 import {
   deleteScheduledPost,
+  fetchScheduledPosts,
   findNextFreeBerlinSlots,
   formatBerlinDateTime,
   getBerlinParts,
-  loadZernioConfig,
+  loadBufferConfig,
   retryScheduledPost,
-  saveZernioConfig,
   type PostStatus,
   type ScheduledPost,
   type SocialPlatform,
-  type ZernioConfigState,
+  type BufferConfigState,
 } from "../lib/scheduler";
 
 const PLATFORM_BADGES: Record<
@@ -50,6 +50,7 @@ const PLATFORM_BADGES: Record<
 };
 
 const STATUS_STYLES: Record<PostStatus, { label: string; style: string }> = {
+  Unklar: { label: "In Buffer prüfen", style: "border-amber-warn text-amber-warn" },
   Geplant: {
     label: "Geplant",
     style: "border-volt-400/50 bg-volt-400/15 text-volt-300",
@@ -89,8 +90,18 @@ export default function CalendarView({
   const [cursorDate, setCursorDate] = useState<Date>(() => new Date());
   const [selectedPost, setSelectedPost] = useState<ScheduledPost | null>(null);
   const [showConfigModal, setShowConfigModal] = useState(false);
-  const [zernioCfg, setZernioCfg] = useState<ZernioConfigState>(() => loadZernioConfig());
+  const [bufferCfg, setBufferCfg] = useState<BufferConfigState>(() => loadBufferConfig());
   const [busyPostId, setBusyPostId] = useState<string | null>(null);
+
+  const [actionError, setActionError] = useState("");
+  const [refreshing, setRefreshing] = useState(false);
+  const [connection, setConnection] = useState<boolean | null>(null);
+  async function refresh() {
+    setRefreshing(true); setActionError("");
+    try { const data = await fetchScheduledPosts(); onPostsChange(data.posts); setConnection(data.hasApiKey); }
+    catch (e) { setConnection(false); setActionError(e instanceof Error ? e.message : String(e)); }
+    finally { setRefreshing(false); }
+  }
 
   /* ------------------------------------------------------------ */
   /*  Dashboard Metrics Calculation (Europe/Berlin)                */
@@ -148,11 +159,14 @@ export default function CalendarView({
 
   const handleRetry = async (post: ScheduledPost) => {
     setBusyPostId(post.id);
+    setActionError("");
     try {
       const updated = await retryScheduledPost(post.id);
       onPostsChange(updated);
       const refreshed = updated.find((x) => x.id === post.id) || null;
       setSelectedPost(refreshed);
+    } catch (e) {
+      setActionError(e instanceof Error ? e.message : String(e));
     } finally {
       setBusyPostId(null);
     }
@@ -160,10 +174,13 @@ export default function CalendarView({
 
   const handleDelete = async (post: ScheduledPost) => {
     setBusyPostId(post.id);
+    setActionError("");
     try {
       const updated = await deleteScheduledPost(post.id);
       onPostsChange(updated);
       setSelectedPost(null);
+    } catch (e) {
+      setActionError(e instanceof Error ? e.message : String(e));
     } finally {
       setBusyPostId(null);
     }
@@ -228,19 +245,21 @@ export default function CalendarView({
   }, [cursorDate]);
 
   return (
-    <div className="grid gap-6 animate-rise">
+    <div className="grid min-w-0 gap-6 animate-rise">
+      {actionError && <p role="alert" className="border border-rose-err p-3 font-mono text-xs text-rose-err">{actionError}</p>}
+      <p className="font-mono text-[10px] text-coal-400">Lokales Versandjournal dieses Browsers. Status wird nur nach Buffer-Bestätigung geändert; externe Buffer-Posts werden nicht importiert.</p>
       {/* ============================================================ */}
       {/*  DASHBOARD METRICS BAR                                       */}
       {/* ============================================================ */}
-      <section className="card-bracket border border-coal-600 bg-coal-900/90 p-5">
+      <section className="card-bracket min-w-0 border border-coal-600 bg-coal-900/90 p-4 sm:p-5">
         <div className="flex flex-wrap items-center justify-between gap-4 border-b border-coal-700/70 pb-4">
-          <div className="flex items-center gap-3">
+          <div className="flex min-w-0 items-center gap-3">
             <div className="bg-heat grid size-10 place-items-center text-coal-950">
               <CalendarIcon className="size-5" strokeWidth={2.4} />
             </div>
             <div>
               <h2 className="font-display text-lg font-black tracking-tight uppercase text-paper-100">
-                Social Media Kalender & Zernio Dashboard
+                Social Media Kalender & Buffer Dashboard
               </h2>
               <p className="font-mono text-[10.5px] text-coal-300">
                 Automatische Slots: <strong className="text-volt-300">06:00 Uhr</strong> &{" "}
@@ -251,23 +270,25 @@ export default function CalendarView({
           </div>
 
           <div className="flex flex-wrap items-center gap-2.5">
+            <button disabled={refreshing} onClick={refresh} className="border border-coal-600 px-3 py-2 font-mono text-xs text-volt-300 disabled:opacity-50">{refreshing ? "Lädt …" : "Buffer-Status aktualisieren"}</button>
+            <a href="https://publish.buffer.com" target="_blank" rel="noreferrer" className="font-mono text-xs text-volt-300">Buffer öffnen ↗</a>
             <span
               className={cn(
                 "flex items-center gap-1.5 border px-3 py-1.5 font-mono text-[10px] font-bold tracking-wider",
-                hasApiKey
+                (connection ?? hasApiKey)
                   ? "border-volt-400/50 bg-volt-400/10 text-volt-300"
                   : "border-amber-warn/50 bg-amber-warn/10 text-amber-warn"
               )}
             >
               <Globe className="size-3.5" />
-              {hasApiKey ? "ZERNIO API VERBUNDEN" : "ZERNIO LOKAL / SIMULIERT"}
+              {(connection ?? hasApiKey) ? "BUFFER API KONFIGURIERT" : "BUFFER NICHT VERBUNDEN"}
             </span>
             <button
               type="button"
-              onClick={() => setShowConfigModal(true)}
+              onClick={() => { setBufferCfg(loadBufferConfig()); setShowConfigModal(true); }}
               className="flex items-center gap-1.5 border border-coal-600 bg-coal-850 px-3 py-1.5 font-mono text-[10px] font-bold tracking-widest text-coal-200 hover:border-volt-400 hover:text-volt-300"
             >
-              <SettingsIcon className="size-3.5" /> ZERNIO KANÄLE
+              <SettingsIcon className="size-3.5" /> BUFFER KANÄLE
             </button>
           </div>
         </div>
@@ -335,7 +356,7 @@ export default function CalendarView({
       {/* ============================================================ */}
       {/*  CALENDAR CONTROLS & GRID                                    */}
       {/* ============================================================ */}
-      <section className="card-bracket border border-coal-600 bg-coal-900/90 p-5">
+      <section className="card-bracket min-w-0 border border-coal-600 bg-coal-900/90 p-4 sm:p-5">
         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-coal-700/70 pb-4">
           <div className="flex items-center gap-2">
             <button
@@ -366,7 +387,7 @@ export default function CalendarView({
             </h3>
           </div>
 
-          <div className="flex items-center gap-1.5">
+          <div className="flex flex-wrap items-center gap-1.5">
             {(
               [
                 ["month", "Monatsansicht"],
@@ -591,6 +612,7 @@ export default function CalendarView({
               </button>
             </div>
 
+            {actionError && <p role="alert" className="mt-3 text-xs text-rose-err">{actionError}</p>}
             <div className="mt-5 grid gap-5 sm:grid-cols-[200px_1fr]">
               {/* Video Preview */}
               <div className="overflow-hidden border border-coal-700 bg-black">
@@ -620,7 +642,7 @@ export default function CalendarView({
                 <div className="grid gap-3">
                   <div>
                     <span className="mono-label block text-[9px] text-coal-400">BESCHREIBUNG</span>
-                    <p className="mt-1 border border-coal-700/80 bg-coal-850 p-3 font-mono text-[11px] leading-relaxed text-coal-200">
+                    <p className="mt-1 whitespace-pre-wrap border border-coal-700/80 bg-coal-850 p-3 font-mono text-[11px] leading-relaxed text-coal-200">
                       {selectedPost.description || "Keine Beschreibung angegeben."}
                     </p>
                   </div>
@@ -641,9 +663,9 @@ export default function CalendarView({
 
                   <div className="grid grid-cols-2 gap-2 border border-coal-700/60 bg-coal-850/50 p-3 font-mono text-[10px]">
                     <div>
-                      <span className="text-coal-400 block">ZERNIO POST ID:</span>
+                      <span className="text-coal-400 block">BUFFER POST ID:</span>
                       <span className="text-paper-100 font-bold">
-                        {selectedPost.zernioPostId || "Ausstehend"}
+                        {selectedPost.bufferPostId || "Ausstehend"}
                       </span>
                     </div>
                     <div>
@@ -652,7 +674,7 @@ export default function CalendarView({
                     </div>
                   </div>
 
-                  {selectedPost.status === "Fehler" && selectedPost.errorMessage && (
+                  {selectedPost.errorMessage && (
                     <div className="border border-rose-err/50 bg-rose-err/10 p-3">
                       <div className="flex items-center gap-1.5 font-mono text-[10.5px] font-bold text-rose-err">
                         <AlertTriangle className="size-4 shrink-0" />
@@ -677,14 +699,14 @@ export default function CalendarView({
                   </button>
 
                   <div className="flex items-center gap-2">
-                    {selectedPost.status === "Fehler" && (
+                    {selectedPost.status === "Fehler" && !selectedPost.bufferPostId && (
                       <button
                         type="button"
                         onClick={() => handleRetry(selectedPost)}
                         disabled={busyPostId === selectedPost.id}
                         className="bg-heat flex items-center gap-1.5 border border-volt-400 px-4 py-2.5 font-display text-xs font-black uppercase text-coal-950"
                       >
-                        <RotateCw className="size-3.5" /> Erneut versuchen (Zernio Retry)
+                        <RotateCw className="size-3.5" /> Erneut versuchen (Buffer Retry)
                       </button>
                     )}
                     <button
@@ -703,7 +725,7 @@ export default function CalendarView({
       )}
 
       {/* ============================================================ */}
-      {/*  ZERNIO CHANNELS & CONFIGURATION MODAL                       */}
+      {/*  BUFFER CHANNELS & CONFIGURATION MODAL                       */}
       {/* ============================================================ */}
       {showConfigModal && (
         <div
@@ -713,13 +735,13 @@ export default function CalendarView({
           aria-modal="true"
         >
           <div
-            className="card-bracket relative w-full max-w-lg border border-coal-600 bg-coal-900 p-5 sm:p-6 my-8 animate-rise"
+            className="card-bracket relative w-full max-w-3xl border border-coal-600 bg-coal-900 p-5 sm:p-6 my-8 animate-rise"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex items-start justify-between border-b border-coal-700/70 pb-4">
               <div>
                 <h3 className="font-display text-base font-black uppercase text-paper-100">
-                  Zernio Social-Media-Kanäle
+                  Buffer Social-Media-Kanäle
                 </h3>
                 <p className="font-mono text-[10.5px] text-coal-300">
                   Verwalte deine Kanal-IDs für TikTok, Instagram und YouTube Shorts.
@@ -734,72 +756,8 @@ export default function CalendarView({
               </button>
             </div>
 
-            <div className="mt-4 grid gap-3">
-              <div className="flex items-start gap-2 border border-coal-700 bg-coal-850 p-3">
-                <ShieldCheck className="size-4 text-volt-400 shrink-0 mt-0.5" />
-                <p className="font-mono text-[10px] leading-relaxed text-coal-300">
-                  Der geheime <code className="text-volt-300">ZERNIO_API_KEY</code> wird niemals im Browser gespeichert, sondern ausschließlich über die Backend-Umgebungsvariable geladen.
-                </p>
-              </div>
-
-              <div>
-                <label className="mono-label mb-1 block text-[9px] text-coal-400">
-                  TIKTOK ACCOUNT ID (OPTIONAL)
-                </label>
-                <input
-                  type="text"
-                  value={zernioCfg.tiktokAccountId}
-                  onChange={(e) =>
-                    setZernioCfg((prev) => ({ ...prev, tiktokAccountId: e.target.value }))
-                  }
-                  placeholder="z.B. acc_tiktok_9812..."
-                  className="w-full border border-coal-700 bg-coal-850 px-3 py-2 font-mono text-[11px] text-paper-100"
-                />
-              </div>
-
-              <div>
-                <label className="mono-label mb-1 block text-[9px] text-coal-400">
-                  INSTAGRAM ACCOUNT ID (OPTIONAL)
-                </label>
-                <input
-                  type="text"
-                  value={zernioCfg.instagramAccountId}
-                  onChange={(e) =>
-                    setZernioCfg((prev) => ({ ...prev, instagramAccountId: e.target.value }))
-                  }
-                  placeholder="z.B. acc_ig_4412..."
-                  className="w-full border border-coal-700 bg-coal-850 px-3 py-2 font-mono text-[11px] text-paper-100"
-                />
-              </div>
-
-              <div>
-                <label className="mono-label mb-1 block text-[9px] text-coal-400">
-                  YOUTUBE SHORTS CHANNEL ID (OPTIONAL)
-                </label>
-                <input
-                  type="text"
-                  value={zernioCfg.youtubeAccountId}
-                  onChange={(e) =>
-                    setZernioCfg((prev) => ({ ...prev, youtubeAccountId: e.target.value }))
-                  }
-                  placeholder="z.B. acc_yt_7731..."
-                  className="w-full border border-coal-700 bg-coal-850 px-3 py-2 font-mono text-[11px] text-paper-100"
-                />
-              </div>
-            </div>
-
-            <div className="mt-5 flex justify-end gap-2 border-t border-coal-700/70 pt-4">
-              <button
-                type="button"
-                onClick={() => {
-                  saveZernioConfig(zernioCfg);
-                  setShowConfigModal(false);
-                }}
-                className="bg-heat border border-volt-400 px-5 py-2.5 font-display text-xs font-black uppercase text-coal-950"
-              >
-                Speichern
-              </button>
-            </div>
+            <div className="mt-4"><BufferChannels config={bufferCfg} onChange={setBufferCfg} /></div>
+            <button onClick={() => setShowConfigModal(false)} className="bg-heat mt-5 px-5 py-3 font-bold text-coal-950">Fertig</button>
           </div>
         </div>
       )}

@@ -1,7 +1,8 @@
 # ShortsFactory — Clip Mill Edition
 
-**One clip in. Ten shorts out.** A video assembly line that runs **100 % in your
-browser**: no server, no cloud render farm, no ffmpeg. Feed it one long
+**One clip in. Ten shorts out.** A video assembly line that **renders entirely in your
+browser**: no cloud render farm, no ffmpeg. Narration and optional Buffer
+dispatch use small same-origin server routes. Feed it one long
 background video, get ten different moments — each with its own AI story,
 neural voice and word-synced captions — then press **Render**.
 
@@ -45,7 +46,7 @@ copyright. The panel shows the legal one-step alternative:
 * Licensed / Creative-Commons footage → get the file from the rights holder or stock site.
 * Or paste a **direct video URL** (`…/clip.mp4`) that allows cross-origin requests — your own hosting, S3/R2, Pexels, Coverr, Mixkit. Those are streamed into a local blob with a progress bar and sliced exactly the same way.
 
-## Settings (5 tabs)
+## Settings (6 tabs)
 
 | Tab | Controls |
 | --- | --- |
@@ -53,31 +54,132 @@ copyright. The panel shows the legal one-step alternative:
 | **VOICE** | 12 Edge neural voices, speaking rate ±40 %, pitch ±20 Hz, voice volume, music-bed volume, music fade-out, tail padding |
 | **CAPTIONS** | On/off, 4 style presets, 1–5 words per cue, colour swatches + custom picker, text size, vertical position, outline weight, uppercase, drop shadow — with a **live preview** |
 | **VIDEO** | Resolution (auto / 540 / 720 / 1080), frame rate 24·30·60, bitrate, vignette, slow Ken-Burns zoom |
+| **INTRO** | Animated Reddit-inspired title card, on/off, duration 1–12 seconds (default 3.5), live canvas preview |
 | **CLIPS** | Distribution mode, clip length mode + fixed length, skip intro, skip outro |
 
 No API keys? The built-in **offline story writer** takes over — full-length
 first-person stories with zero network.
 
-## Social Dispatch — posten & planen (Zernio)
+## Social Dispatch — Buffer statt Zernio
 
-Alles liegt auf **einer Seite**: Produktion oben, Dashboard + Kalender direkt
-darunter (`📅 Kalender` im Header springt hin).
+Produktion oben, Versand und lokaler Kalender darunter. Die alte Zernio-Route
+wurde entfernt. Bestehende Zernio-Posts werden **weder übernommen noch gelöscht**;
+insbesondere werden alte simulierte IDs nicht als echte Buffer-Posts behandelt.
 
-Der **Post**-Button sitzt auf jeder fertigen Video-Karte und in der Output-Bay.
-Im Modal wählst du den Modus:
+### Einmal einrichten
+
+1. In [Buffer → Settings → API](https://publish.buffer.com/settings/api) einen
+   persönlichen API-Key erstellen und die gewünschten Social-Kanäle verbinden.
+2. `BUFFER_API_KEY` ausschließlich als **Server-Umgebungsvariable** setzen:
+   lokal in `.env.local`, auf Vercel in den Projekteinstellungen. Danach Server
+   neu starten bzw. neu deployen. **Kein `VITE_`-Präfix!**
+3. Im Versandfenster oder unter **BUFFER KANÄLE** auf **Kanäle laden /
+   Verbindung prüfen** klicken und TikTok, Instagram und/oder YouTube auswählen.
+   Alternativ echte **Buffer-Kanal-IDs** eintragen, nicht native Plattform-IDs.
+4. **Deployment vor öffentlichem Zugriff schützen** (z. B. Vercel Deployment
+   Protection oder ein authentifizierter Reverse Proxy). Diese persönliche
+   Operator-App hat keine eigene Benutzerverwaltung; der geheime serverseitige
+   Key allein ist keine Zugriffskontrolle für die API-Routen.
+
+Ohne Key wird der Versand ausdrücklich abgelehnt. Kein Simulationsmodus,
+keine erfundenen Post-IDs und keine falschen Erfolgsmeldungen.
+
+### Ohne Vercel Blob / ohne neuen Speicherdienst
+
+Buffer akzeptiert **keine direkten Datei-Uploads per API**, sondern benötigt
+öffentlich abrufbare Medien-URLs. Diese Variante nutzt auf Wunsch **dein eigenes
+Hosting** und fügt keinen Storage-Dienst hinzu:
+
+1. Videos fertig rendern und einzeln oder als ZIP herunterladen.
+2. Die **fertigen Ausgabedateien** auf dein vorhandenes Hosting laden.
+3. **An Buffer · N Videos** in der Output Bay anklicken.
+4. Pro Video den direkten HTTPS-Link eintragen — alternativ alle Links
+   zeilenweise in derselben Reihenfolge einfügen. Einzelne Videos lassen sich
+   abwählen. Die lokale Vorschau hilft beim Zuordnen.
+5. Links ohne Login in einem privaten Browserfenster prüfen und bestätigen.
+   Die URL muss die Videodatei liefern, keine HTML-Vorschau. Sie muss bis zur
+   tatsächlichen Veröffentlichung erreichbar bleiben. Keine ablaufenden
+   Signaturen, lokalen `blob:`-Links oder Drive-/Social-Freigabeseiten.
+6. Beschreibung, Kanäle und Modus prüfen, dann den gesamten Stapel senden.
+
+Jedes ausgewählte Video wird **genau einmal pro ausgewähltem Kanal** gesendet,
+keine Rotation und kein Auffüllen eines einzelnen Videos auf zehn Posts.
+Buffer bzw. die jeweilige Plattform prüft Medienformat/-größe/-dauer; MP4 mit
+H.264/AAC ist zu bevorzugen. Der lokale Renderer verwendet MP4, wenn der Browser
+es unterstützt, andernfalls WebM. WebM gegebenenfalls vor dem Hosting konvertieren.
+Die App prüft URL-Formate, garantiert aber keine externe Erreichbarkeit oder
+plattformübergreifende Medienkompatibilität.
 
 | Modus | Verhalten |
 | --- | --- |
-| **Jetzt posten** | Sofortige Veröffentlichung (`publishNow`), leicht gestaffelt gegen Rate-Limits |
-| **Auto-Plan** | 06:00 & 20:00 Uhr über die nächsten freien Tage — belegte Slots werden übersprungen |
-| **Frei planen** | Eigene Uhrzeiten (`09:15, 13:00, 18:45`), Startdatum, Rhythmus (täglich … wöchentlich) |
+| **Buffer-Queue** (Standard) | `addToQueue`: Buffer wählt Slots aus deinem dortigen Zeitplan |
+| **Jetzt posten** | `shareNow`: nach ausdrücklichem Klick direkt zur Veröffentlichung übergeben |
+| **Auto-Plan** | `customScheduled`: nächste lokal freie Slots um 06:00 & 20:00 Uhr |
+| **Frei planen** | Eigene Uhrzeiten, Startdatum und Tagesabstand in Europe/Berlin |
 
-Anzahl der Posts ist frei wählbar (1–40). Alle Zeiten laufen in
-**Europe/Berlin**, kein Slot wird je doppelt belegt.
+Der Browser wartet standardmäßig **3 Sekunden nach jeder Buffer-Antwort** vor
+der nächsten Anfrage (einstellbar 2–60 Sekunden, auch zwischen Kanälen). Das ist
+ein **Sendeintervall**, kein Veröffentlichungsintervall der Queue. Es findet
+kein paralleler Versand statt. Tab offen lassen; Stop beendet den Stapel **nach
+dem aktuellen Post**, dessen Ergebnis noch gespeichert wird. Bereits bei Buffer
+angenommene Posts bleiben dort bestehen und können unabhängig vom Tab erscheinen.
 
-Der `ZERNIO_API_KEY` lebt ausschließlich serverseitig in `api/zernio.js`
-(Vercel Env-Variable) und erreicht den Browser nie. Ohne Key läuft alles im
-lokalen Simulations-Modus weiter.
+Das Versandjournal liegt unter einem neuen Buffer-spezifischen localStorage-Key.
+Bestätigte Posts werden sofort gespeichert; eindeutige Fehler lassen sich im
+Kalender wiederholen. Bei Verbindungsabbruch ist das Ergebnis **Unklar** — der
+Stapel stoppt, kein automatischer Retry erzeugt versehentlich ein Duplikat. Vor
+weiteren Aktionen direkt in Buffer prüfen. Rate-Limits stoppen ebenfalls den
+Stapel. Bestätigte Löschungen erfolgen zuerst bei Buffer, dann im lokalen Journal.
+
+**Grenzen:** Das Journal gehört zu diesem Browser; lokale Daten nicht während des
+Versands löschen und nur einen Versand-Tab verwenden. Keine globale, dauerhafte
+Idempotenz-Datenbank. Der Kalender importiert keine extern erstellten Buffer-Posts.
+Auto-/Frei-Plan überspringt nur lokal bekannte belegte Slots; für Abgleich mit
+anderen Buffer-Posts **Buffer-Queue** verwenden. Statusänderungen kommen über
+**Buffer-Status aktualisieren**, nicht durch einen lokalen Uhrzeit-Timer.
+
+### Standardbeschreibung
+
+Wird für **alle** ausgewählten Videos exakt mit diesen Absätzen übernommen,
+ohne automatisch vorangestellten Titel oder zusätzliche Hashtags:
+
+```text
+You won't believe how this story ends...
+
+Stay until the end because the plot twist is INSANE.
+
+Would you have done the same?
+
+#reddit #redditstories #storytime
+
+#stories #fyp
+```
+
+Die Beschreibung ist im Versandfenster editierbar. YouTube bekommt zusätzlich
+einen separaten Titel und die Kategorie Entertainment; Instagram wird als Reel
+gesendet. Sonstige Konto-/Plattformvorgaben bleiben in Buffer maßgeblich.
+
+### Intro-Karte
+
+**Machine Settings → INTRO**: an/aus, Dauer von 1–12 Sekunden (inklusive Ein- und
+Ausflug), Standard 3,5 Sekunden. Die helle Reddit-inspirierte Karte übernimmt den
+jeweiligen Titel aus der vorbereiteten Idee. Lange Titel werden umgebrochen und
+verkleinert, extrem lange Texte begrenzt. Voice startet sofort; während der Karte
+wandern Captions in die untere Safe-Zone. Vorschau und Renderer verwenden denselben
+Canvas-Zeichner. Änderungen erfordern **RE-RENDER** und die neu gerenderte Datei auf
+deinem Hosting; ein später geänderter YouTube-Posttitel verändert das Video nicht.
+Die Vorschau respektiert reduzierte Bewegung; im exportierten Video bleibt die
+gewählte Animation enthalten. Kein Referenz-Anhang lag bei der Umsetzung vor.
+
+### Verwendete Buffer-Dokumentation
+
+- [Hosting Media](https://developers.buffer.com/guides/hosting-media.html)
+- [Create Video Post](https://developers.buffer.com/examples/create-video-post.html)
+- [Posts & Scheduling](https://developers.buffer.com/guides/posts-and-scheduling.html)
+- [CreatePostInput](https://developers.buffer.com/types/CreatePostInput.html)
+- [ShareMode](https://developers.buffer.com/types/ShareMode.html)
+- [YouTube-Metadaten](https://developers.buffer.com/types/YoutubePostMetadataInput.html)
+- [Instagram-Metadaten](https://developers.buffer.com/types/InstagramPostMetadataInput.html)
 
 ## Lokaler Asset-Speicher
 
@@ -91,7 +193,9 @@ zeigt unter `ASSET VAULT` an, was gerade lokal liegt.
 ```bash
 npm install
 npm run dev        # open the printed URL (narration relay included, same origin)
-npm run build      # static bundle in dist/
+npm run build      # static bundle in dist/ (deploy api/ alongside it)
+npm run typecheck  # TypeScript checks
+npm test           # unit/integration tests with mocked Buffer; Node 22.7+
 ```
 
 Deploying to Vercel works with zero configuration: `api/tts.js` is picked up
@@ -131,7 +235,8 @@ Same origin → no CORS, no apikey, no Supabase anon key, no configuration.
 | Captions | WordBoundary timestamps grouped into N-word cues, drawn on canvas |
 | Rendering | Canvas 2D + WebAudio graph + MediaRecorder, real-time capture, MP4/H.264 on Safari with automatic WebM fallback |
 | ZIP | JSZip (STORE) → blob anchor, fully local |
-| Your files | Never uploaded — read straight from device memory |
+| Your files | Sources and renders stay local; only your explicit public video links and post text go to Buffer |
+| Buffer | Browser → `/api/buffer` → `https://api.buffer.com` GraphQL; key stays server-side |
 
 Rendering is real-time: a 40-second voice takes ~40 seconds per unit, and the
 tab must stay in the foreground (that's how MediaRecorder captures frames).
@@ -143,7 +248,7 @@ src/
 ├─ App.tsx                     orchestrator: prepare → render → zip
 ├─ components/
 │  ├─ Header.tsx               LEDs, clock, marquee
-│  ├─ SettingsPanel.tsx        5-tab settings console
+│  ├─ SettingsPanel.tsx        6-tab settings console + animated intro preview
 │  ├─ Controls.tsx             sliders, toggles, segmented, colour swatches
 │  ├─ IdeasPanel.tsx           the 10 numbered inputs
 │  ├─ ClipMill.tsx             1-source slicing + link intake + 10-file mode
@@ -152,8 +257,11 @@ src/
 └─ lib/
    ├─ settings.ts   llm.ts   tts.ts   renderer.ts   clips.ts   media.ts   types.ts
 
-api/        ← tts relay (Vercel Serverless Function, Node.js runtime + ws)
+api/        ← TTS + Buffer relays (Vercel Serverless Functions, Node.js)
+shared/     ← public URL validation + Buffer payload building
+server/     ← same-origin API middleware for local Vite development
+tests/      ← Buffer relay, dispatch, scheduling and intro regression tests
 supabase/   ← inert legacy v1 (hosted Edge Functions + Shotstack), unused
 ```
 
-— No server. No ffmpeg. No cloud. No mercy.
+— Local rendering. Your hosting. Buffer dispatch.

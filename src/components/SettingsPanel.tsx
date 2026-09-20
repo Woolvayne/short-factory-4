@@ -12,6 +12,7 @@ import {
   Trash2,
 } from "lucide-react";
 import Section from "./Section";
+import IntroPreview from "./IntroPreview";
 import { ColorSwatches, Field, Segmented, Slider, Toggle } from "./Controls";
 import {
   CAPTION_PRESETS,
@@ -27,13 +28,14 @@ import {
 } from "../lib/settings";
 import { cn } from "../utils/cn";
 
-type Tab = "ai" | "voice" | "captions" | "video" | "clips";
+type Tab = "ai" | "voice" | "captions" | "video" | "intro" | "clips";
 
 const TABS: { id: Tab; label: string; icon: typeof Sparkles }[] = [
   { id: "ai", label: "AI", icon: Sparkles },
   { id: "voice", label: "VOICE", icon: Mic },
   { id: "captions", label: "CAPTIONS", icon: Captions },
   { id: "video", label: "VIDEO", icon: Clapperboard },
+  { id: "intro", label: "INTRO", icon: Clapperboard },
   { id: "clips", label: "CLIPS", icon: Scissors },
 ];
 
@@ -527,6 +529,20 @@ export default function SettingsPanel({
               </p>
             </div>
           </div>
+        </div>
+      )}
+
+      {tab === "intro" && (
+        <div className="grid gap-5 sm:grid-cols-2">
+          <div className="grid content-start gap-4">
+            <Toggle label="INTRO-TITELKARTE" sub="Reddit-inspirierte Karte fliegt ins Video und wieder hinaus" checked={settings.introOn} disabled={disabled} onChange={v => set("introOn", v)} />
+            <Field label="ANZEIGEDAUER" value={`${settings.introDuration}s`} hint="INKLUSIVE EIN- UND AUSFLUG · AM VIDEOANFANG">
+              <Slider min={1} max={12} step={0.5} value={settings.introDuration} disabled={disabled || !settings.introOn} onChange={v => set("introDuration", v)} />
+            </Field>
+            <p className="font-mono text-xs leading-relaxed text-coal-300">Der Titel kommt aus dem jeweiligen Ideen-/Titelfeld in Schritt 01. Lange Titel werden automatisch umgebrochen und verkleinert. Die Stimme läuft sofort los; Untertitel stehen während der Karte tiefer, damit nichts überlappt.</p>
+            <p className="font-mono text-[10px] text-amber-warn">Änderungen gelten beim nächsten Rendern. Bereits fertige Videos bitte neu rendern und die neue Datei auf deinem Hosting ersetzen.</p>
+          </div>
+          <IntroPreview duration={settings.introDuration} enabled={settings.introOn} />
         </div>
       )}
 

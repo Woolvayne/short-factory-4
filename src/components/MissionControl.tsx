@@ -510,7 +510,7 @@ export function OutputPanel({
                         onClick={() => onPostItems([item])}
                         className="bg-heat flex min-h-[34px] w-full items-center justify-center gap-1.5 border border-volt-400 px-2 py-1.5 font-mono text-[9.5px] font-bold tracking-widest text-coal-950 transition-opacity hover:opacity-90"
                       >
-                        <Send className="size-3" strokeWidth={2.5} /> POST
+                        <Send className="size-3" strokeWidth={2.5} /> BUFFER
                       </button>
                     )}
                     <button
@@ -571,7 +571,7 @@ export function OutputPanel({
                 className="bg-heat flex min-h-[44px] items-center gap-2 border border-volt-400 px-4 py-2.5 font-display text-sm font-black tracking-tight text-coal-950 uppercase transition-opacity hover:opacity-90"
               >
                 <Send className="size-4" strokeWidth={2.5} />
-                Post · {doneCount} Video{doneCount === 1 ? "" : "s"}
+                An Buffer · {doneCount} Video{doneCount === 1 ? "" : "s"}
               </button>
             )}
             {zip.url && zip.name ? (

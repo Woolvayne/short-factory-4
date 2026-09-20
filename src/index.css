@@ -434,3 +434,12 @@ button:disabled { cursor: not-allowed; }
     transition-duration: 0.01ms !important;
   }
 }
+/* Native, visible checkboxes for Buffer channel / video selection. */
+input[type="checkbox"] {
+  -webkit-appearance: checkbox;
+  appearance: auto;
+  width: 1rem;
+  height: 1rem;
+  flex-shrink: 0;
+  accent-color: #d9ff3f;
+}

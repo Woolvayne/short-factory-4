@@ -115,7 +115,7 @@ export default function App() {
 
   /* social scheduling */
   const [scheduledPosts, setScheduledPosts] = useState<ScheduledPost[]>(() => loadLocalPosts());
-  const [hasZernioKey, setHasZernioKey] = useState(false);
+  const [hasBufferKey, setHasBufferKey] = useState(false);
   const [postModalItems, setPostModalItems] = useState<LocalRenderItem[] | null>(null);
   const [vaultReady, setVaultReady] = useState(false);
 
@@ -184,15 +184,15 @@ export default function App() {
     };
   }, []);
 
-  /* ---- load scheduled posts + Zernio key status ---- */
+  /* ---- load scheduled posts + Buffer key status ---- */
   useEffect(() => {
     let cancelled = false;
     (async () => {
       const { posts, hasApiKey } = await fetchScheduledPosts();
       if (cancelled) return;
       setScheduledPosts(posts);
-      setHasZernioKey(hasApiKey);
-    })();
+      setHasBufferKey(hasApiKey);
+    })().catch(() => { if (!cancelled) setHasBufferKey(false); });
     return () => {
       cancelled = true;
     };
@@ -587,6 +587,7 @@ export default function App() {
         try {
           const result = await renderLocal({
             bgUrl: useUrl,
+            title: itemsRef.current.find((item) => item.index === index)?.idea || "Storytime",
             clipStart: mode === "single" ? (clip?.start ?? 0) : Math.random() * 3,
             voiceMp3: take.audio,
             words: take.words,
@@ -736,12 +737,12 @@ export default function App() {
       >
         {/* hero */}
         <div className="grid gap-6 pt-8 pb-6 sm:pt-10 sm:pb-8 lg:grid-cols-[1.5fr_1fr] lg:items-end">
-          <div className="animate-rise">
+          <div className="animate-rise min-w-0">
             <p className="mono-label mb-4 flex items-center gap-2 text-[10px] text-volt-400">
               <span className="inline-block size-1.5 animate-led rounded-full bg-volt-400 text-volt-400" />
               LINE STATUS: {busy ? "RUNNING" : phase === "staged" ? "LOADED — PRESS RENDER" : "ARMED"}
             </p>
-            <h1 className="font-display text-[13vw] leading-[0.86] font-black tracking-[-0.03em] uppercase sm:text-7xl lg:text-[92px]">
+            <h1 className="font-display text-[11.5vw] leading-[0.86] font-black tracking-[-0.03em] uppercase sm:text-7xl lg:text-[92px]">
               One clip in.
               <br />
               <span className="text-outline">Ten shorts</span>
@@ -755,7 +756,7 @@ export default function App() {
           </div>
 
           <div
-            className="animate-rise space-y-px border border-coal-700 bg-coal-900/80"
+            className="animate-rise min-w-0 space-y-px border border-coal-700 bg-coal-900/80"
             style={{ animationDelay: "120ms" }}
           >
             {[
@@ -897,7 +898,7 @@ export default function App() {
           </div>
           <CalendarView
             posts={scheduledPosts}
-            hasApiKey={hasZernioKey}
+            hasApiKey={hasBufferKey}
             onPostsChange={setScheduledPosts}
           />
         </div>
