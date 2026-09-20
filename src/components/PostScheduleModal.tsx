@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { AlertTriangle, Check, ExternalLink, HardDriveUpload, Loader2, Send, X } from 'lucide-react';
 import type { LocalRenderItem } from '../lib/types';
 import { DEFAULT_DESCRIPTION, formatBerlinDateTime, loadBufferConfig, planSlots, saveBufferConfig, scheduleBatchPosts, validateVideoUrl, type DispatchProgress, type ScheduledPost, type ScheduleMode } from '../lib/scheduler';
-import { fetchUploadStatus, uploadRenderFile, checkIaCredentials, clearIaCredentials, loadIaCredentials, saveIaCredentials, type IaCredentials, type UploadHostStatus } from '../lib/uploader';
+import { fetchUploadStatus, uploadRenderFile, checkBlobToken, clearBlobToken, loadBlobToken, saveBlobToken, type UploadHostStatus } from '../lib/uploader';
 import { videoFileName } from './MissionControl';
 import BufferChannels from './BufferChannels';
 
@@ -10,14 +10,6 @@ const inputClass = 'w-full border border-coal-600 bg-coal-850 px-3 py-2 font-mon
 /** Upload-consent is remembered: the second batch onward is a single button press. */
 const UPLOAD_CONSENT_KEY = 'shortsfactory.buffer_upload_consent.v1';
 const readUploadConsent = () => { try { return localStorage.getItem(UPLOAD_CONSENT_KEY) === '1'; } catch { return false; } };
-const CORS_SNIPPET = `[
-  {
-    "AllowedOrigins": ["*"],
-    "AllowedMethods": ["PUT", "GET", "HEAD"],
-    "AllowedHeaders": ["content-type"],
-    "MaxAgeSeconds": 3600
-  }
-]`;
 
 type UploadState = { status: 'pending' | 'uploading' | 'done' | 'error'; loaded: number; total: number; error?: string };
 
@@ -33,15 +25,11 @@ export default function PostScheduleModal({ targetItems, existingPosts, autoStar
   const [startDate, setStartDate] = useState(() => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Berlin', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date()));
   const [dayStep, setDayStep] = useState(1);
   const [rows, setRows] = useState(() => targetItems.filter(i => i.status === 'done').map(item => ({ item, selected: true, url: item.publicUrl ?? '', title: item.idea })));
-  const [bulkUrls, setBulkUrls] = useState('');
   const [host, setHost] = useState<UploadHostStatus | null>(null);
-  const [iaCreds, setIaCreds] = useState<IaCredentials | null>(loadIaCredentials);
-  const [iaAccess, setIaAccess] = useState('');
-  const [iaSecret, setIaSecret] = useState('');
-  const [iaItem, setIaItem] = useState('shortsfactory-videos');
+  const [blobToken, setBlobToken] = useState<string | null>(loadBlobToken);
+  const [tokenInput, setTokenInput] = useState('');
   const [connecting, setConnecting] = useState(false);
   const [connectMsg, setConnectMsg] = useState('');
-  const [manualLinks, setManualLinks] = useState(false);
   const [uploads, setUploads] = useState<Record<number, UploadState>>({});
   const [uploadDone, setUploadDone] = useState(0);
   const [uploadTotal, setUploadTotal] = useState(0);
@@ -56,15 +44,14 @@ export default function PostScheduleModal({ targetItems, existingPosts, autoStar
   const plan = { mode, count: active.length, times: times.split(/[,\s]+/).filter(Boolean), startDate, dayStep };
   const slots = planSlots(existingPosts, plan);
   const total = active.length * config.defaultPlatforms.length;
-  const envUpload = Boolean(host?.configured);
-  const iaLocal = !envUpload && Boolean(iaCreds);
-  const uploadMode = (envUpload || iaLocal) && !manualLinks;
-  const repeatWarnings = useMemo(() => uploadMode
+  const envUpload = Boolean(host?.configured); // server env BLOB_READ_WRITE_TOKEN
+  const appToken = !envUpload && Boolean(blobToken); // token lives in this browser only
+  const connected = envUpload || appToken;
+  const repeatWarnings = useMemo(() => connected
     ? active.filter(r => existingPosts.some(p => p.title === r.title && p.status !== 'Fehler')).map(r => `Video ${String(r.item.index + 1).padStart(2, '0')}`)
-    : [], [uploadMode, active, existingPosts]);
-  const consentGiven = uploadMode ? acknowledged || readUploadConsent() : acknowledged;
-  const valid = active.length > 0 && total > 0
-    && (uploadMode || active.every(r => !validateVideoUrl(r.url.trim())))
+    : [], [connected, active, existingPosts]);
+  const consentGiven = connected ? acknowledged || readUploadConsent() : acknowledged;
+  const valid = connected && active.length > 0 && total > 0
     && config.defaultPlatforms.every(p => config[`${p}ChannelId`].trim())
     && consentGiven && (repeatWarnings.length === 0 || repeatAck);
 
@@ -84,7 +71,7 @@ export default function PostScheduleModal({ targetItems, existingPosts, autoStar
 
   function ack(checked: boolean) {
     setAcknowledged(checked);
-    if (uploadMode) {
+    if (connected) {
       // remember or revoke the upload consent (second batch onward = one press)
       try { checked ? localStorage.setItem(UPLOAD_CONSENT_KEY, '1') : localStorage.removeItem(UPLOAD_CONSENT_KEY); } catch { /* private mode */ }
     }
@@ -94,21 +81,20 @@ export default function PostScheduleModal({ targetItems, existingPosts, autoStar
     return uploads[index] ?? { status: 'pending', loaded: 0, total: 0 };
   }
 
-  async function connectIa() {
+  async function connectBlob() {
     if (connecting) return;
-    const accessKey = iaAccess.trim(); const secretKey = iaSecret.trim(); const item = iaItem.trim() || 'shortsfactory-videos';
-    if (!accessKey || !secretKey) { setConnectMsg('Bitte access key und secret key eingeben (archive.org/account/s3.php).'); return; }
-    setConnecting(true); setConnectMsg('Prüfe Schlüssel beim Internet Archive …');
+    const token = tokenInput.trim();
+    if (!token) { setConnectMsg('Bitte das Read/Write-Token einfügen (vercel.com → Projekt → Storage → Blob).'); return; }
+    setConnecting(true); setConnectMsg('Prüfe Token bei Vercel Blob …');
     try {
-      const result = await checkIaCredentials({ accessKey, secretKey, item });
+      const result = await checkBlobToken(token);
       if (result.ok) {
-        const creds = { accessKey, secretKey, item };
-        saveIaCredentials(creds);
-        setIaCreds(creds);
-        setIaSecret('');
+        saveBlobToken(token);
+        setBlobToken(token);
+        setTokenInput('');
         setConnectMsg('');
       } else {
-        setConnectMsg(result.error || 'Verbindung nicht bestätigt. Bitte Schlüssel prüfen.');
+        setConnectMsg(result.error || 'Verbindung nicht bestätigt. Bitte das Token prüfen.');
       }
     } catch (e) {
       setConnectMsg(e instanceof Error ? e.message : String(e));
@@ -117,10 +103,9 @@ export default function PostScheduleModal({ targetItems, existingPosts, autoStar
     }
   }
 
-  function disconnectIa() {
-    clearIaCredentials();
-    setIaCreds(null);
-    setManualLinks(false);
+  function disconnectBlob() {
+    clearBlobToken();
+    setBlobToken(null);
   }
 
   async function send() {
@@ -134,35 +119,32 @@ export default function PostScheduleModal({ targetItems, existingPosts, autoStar
     const uploadedUrls: Record<number, string> = {};
     try {
       saveBufferConfig(config);
-      if (uploadMode) {
-        // Phase 1 — push every selected video into the bucket, one after another.
-        const queue = active.filter(r => !r.url.trim());
-        setUploadTotal(queue.length); setUploadDone(0);
-        for (let i = 0; i < queue.length; i++) {
-          if (signal.aborted) throw new Error('Abgebrochen. Es wurde noch nichts an Buffer gesendet.');
-          const row = queue[i];
-          const size = row.item.blob?.size ?? 0;
-          setUploads(s => ({ ...s, [row.item.index]: { status: 'uploading', loaded: 0, total: size } }));
-          try {
-            const publicUrl = await uploadRenderFile(row.item.blob!, {
-              filename: videoFileName(row.item),
-              contentType: row.item.mime || 'video/mp4',
-              signal,
-              iaCreds,
-              onProgress: p => setUploads(s => ({ ...s, [row.item.index]: { status: 'uploading', loaded: p.loaded, total: p.total || size } })),
-            });
-            uploadedUrls[row.item.index] = publicUrl;
-            setRows(prev => prev.map(r => r.item.index === row.item.index ? { ...r, url: publicUrl } : r));
-            setUploads(s => ({ ...s, [row.item.index]: { status: 'done', loaded: size, total: size } }));
-            onUploadedImage?.(row.item.index, publicUrl);
-            setUploadDone(i + 1);
-          } catch (e) {
-            const aborted = signal.aborted || (e instanceof DOMException && e.name === 'AbortError');
-            setUploads(s => ({ ...s, [row.item.index]: { status: aborted ? 'pending' : 'error', loaded: 0, total: size, error: e instanceof Error ? e.message : String(e) } }));
-            throw new Error(aborted
-              ? 'Upload abgebrochen. Es wurde noch nichts an Buffer gesendet.'
-              : `Upload von Video ${String(row.item.index + 1).padStart(2, '0')} fehlgeschlagen: ${e instanceof Error ? e.message : String(e)} Es wurde noch nichts an Buffer gesendet.`);
-          }
+      // Phase 1 — push every selected video to Vercel Blob, one after another.
+      const queue = active.filter(r => !r.url.trim());
+      setUploadTotal(queue.length); setUploadDone(0);
+      for (let i = 0; i < queue.length; i++) {
+        if (signal.aborted) throw new Error('Abgebrochen. Es wurde noch nichts an Buffer gesendet.');
+        const row = queue[i];
+        const size = row.item.blob?.size ?? 0;
+        setUploads(s => ({ ...s, [row.item.index]: { status: 'uploading', loaded: 0, total: size } }));
+        try {
+          const publicUrl = await uploadRenderFile(row.item.blob!, {
+            filename: videoFileName(row.item),
+            contentType: row.item.mime || 'video/mp4',
+            signal,
+            onProgress: p => setUploads(s => ({ ...s, [row.item.index]: { status: 'uploading', loaded: p.loaded, total: p.total || size } })),
+          });
+          uploadedUrls[row.item.index] = publicUrl;
+          setRows(prev => prev.map(r => r.item.index === row.item.index ? { ...r, url: publicUrl } : r));
+          setUploads(s => ({ ...s, [row.item.index]: { status: 'done', loaded: size, total: size } }));
+          onUploadedImage?.(row.item.index, publicUrl);
+          setUploadDone(i + 1);
+        } catch (e) {
+          const aborted = signal.aborted || (e instanceof DOMException && e.name === 'AbortError');
+          setUploads(s => ({ ...s, [row.item.index]: { status: aborted ? 'pending' : 'error', loaded: 0, total: size, error: e instanceof Error ? e.message : String(e) } }));
+          throw new Error(aborted
+            ? 'Upload abgebrochen. Es wurde noch nichts an Buffer gesendet.'
+            : `Upload von Video ${String(row.item.index + 1).padStart(2, '0')} fehlgeschlagen: ${e instanceof Error ? e.message : String(e)} Es wurde noch nichts an Buffer gesendet.`);
         }
       }
       if (signal.aborted) throw new Error('Abgebrochen. Es wurde noch nichts an Buffer gesendet.');
@@ -199,56 +181,23 @@ export default function PostScheduleModal({ targetItems, existingPosts, autoStar
         {result.map(p => <div key={p.id} className="border border-coal-700 p-3 font-mono text-xs text-coal-200">{p.title} · {p.platform} · {p.status}{p.errorMessage && <p className="mt-1 text-amber-warn">{p.errorMessage}</p>}{p.videoUrl && <p className="mt-1 truncate text-coal-500">{p.videoUrl}</p>}</div>)}
         <button onClick={() => { onClose(); onOpenCalendar(); }} className="bg-heat px-5 py-3 font-bold text-coal-950">Zum Kalender</button>
       </div> : <div className="mt-5 grid gap-6">
-        {uploadMode ? <div className="flex items-start gap-2 border border-volt-400/40 bg-volt-400/5 p-3 font-mono text-xs leading-relaxed text-coal-200">
+        {connected ? <div className="flex items-start gap-2 border border-volt-400/40 bg-volt-400/5 p-3 font-mono text-xs leading-relaxed text-coal-200">
           <HardDriveUpload className="mt-0.5 size-4 shrink-0 text-volt-300" />
-          <span>{envUpload && host?.provider === 'ia'
-            ? <>Internet Archive verbunden (Item <strong>{host?.bucket}</strong>, serverseitig) — komplett kostenlos, ohne Limits. Du musst <strong>keine Links mehr eintragen</strong>: Jedes fertige Video wird automatisch hochgeladen und Buffer erhält den dauerhaften öffentlichen Link.</>
-            : iaLocal
-              ? <>Internet Archive verbunden (Item <strong>{iaCreds?.item}</strong>) — komplett kostenlos, ohne Limits. Die Schlüssel liegen <strong>nur in diesem Browser</strong> gespeichert (wie deine AI-Keys) und werden bei jedem Versand automatisch mitgeschickt. <button type="button" disabled={submitting} onClick={disconnectIa} className="text-volt-300 underline">Verbindung trennen</button></>
-              : <>Upload-Host <strong>{host?.bucket}</strong> (S3) verbunden — du musst <strong>keine Links mehr eintragen</strong>. Jedes fertige Video wird automatisch hochgeladen und Buffer erhält den dauerhaften öffentlichen Link.</>} Modus: <button type="button" disabled={submitting} onClick={() => setManualLinks(true)} className="text-volt-300 underline">stattdessen eigene Links eintragen</button></span>
+          <span>Vercel Blob verbunden{envUpload
+            ? <> (serverseitig via <strong>BLOB_READ_WRITE_TOKEN</strong>)</>
+            : <> — das Read/Write-Token liegt <strong>nur in diesem Browser</strong> gespeichert (wie deine AI-Keys) und wird bei jedem Versand automatisch mitgeschickt</>} — du musst <strong>keine Links mehr eintragen</strong>: Jedes fertige Video wird automatisch hochgeladen und Buffer erhält den dauerhaften öffentlichen Link.{appToken && <> <button type="button" disabled={submitting} onClick={disconnectBlob} className="text-volt-300 underline">Verbindung trennen</button></>}</span>
         </div> : <div className="grid gap-3 border border-amber-warn/40 bg-amber-warn/5 p-3 font-mono text-xs leading-relaxed text-coal-200">
-          <span>Kein Upload-Host eingerichtet. Einmal verbinden — danach nie wieder etwas eintragen oder hochladen auf fremde Hosts:</span>
+          <span>Vercel Blob ist noch nicht verbunden. Einmal verbinden — danach lädt jeder Versand die Videos automatisch hoch und sendet sie an Buffer:</span>
           <div className="grid gap-2 border border-volt-400/40 bg-coal-950/40 p-3">
-            <p className="font-mono text-xs text-paper-100"><strong>Option A (empfohlen): Internet Archive direkt verbinden</strong> — komplett kostenlos, ohne Limits, ohne Kreditkarte. Reicht einmal; gespeichert wird nur in diesem Browser.</p>
-            <div className="grid gap-2 sm:grid-cols-2">
-              <label className="font-mono text-xs text-coal-300">Access Key<input value={iaAccess} onChange={e => setIaAccess(e.target.value)} autoComplete="off" placeholder="aus archive.org/account/s3.php" className={inputClass} /></label>
-              <label className="font-mono text-xs text-coal-300">Secret Key<input type="password" value={iaSecret} onChange={e => setIaSecret(e.target.value)} autoComplete="new-password" placeholder="aus archive.org/account/s3.php" className={inputClass} /></label>
-            </div>
-            <label className="max-w-xs font-mono text-xs text-coal-300">Item-Name (wird automatisch angelegt)<input value={iaItem} onChange={e => setIaItem(e.target.value)} className={inputClass} /></label>
+            <p className="font-mono text-xs text-paper-100"><strong>Vercel Blob verbinden</strong> — einmalig; gespeichert wird nur in diesem Browser.</p>
+            <label className="font-mono text-xs text-coal-300">Read/Write-Token<input type="password" value={tokenInput} onChange={e => setTokenInput(e.target.value)} autoComplete="new-password" placeholder="vercel_blob_rw_… (Storage → Blob → .env.local)" className={inputClass} /></label>
             <div className="flex flex-wrap items-center gap-3">
-              <button type="button" disabled={connecting} onClick={connectIa} className="bg-heat border border-volt-400 px-4 py-2.5 font-display text-xs font-black text-coal-950 uppercase disabled:opacity-50">{connecting ? 'Prüfe …' : 'Mit Internet Archive verbinden'}</button>
-              <a href="https://archive.org/account/s3.php" target="_blank" rel="noreferrer" className="flex items-center gap-1 font-mono text-[10px] text-volt-300"><ExternalLink className="size-3" /> Schlüssel abrufen (kostenloses Konto)</a>
+              <button type="button" disabled={connecting} onClick={connectBlob} className="bg-heat border border-volt-400 px-4 py-2.5 font-display text-xs font-black text-coal-950 uppercase disabled:opacity-50">{connecting ? 'Prüfe …' : 'Vercel Blob verbinden'}</button>
+              <a href="https://vercel.com/docs/storage/vercel-blob" target="_blank" rel="noreferrer" className="flex items-center gap-1 font-mono text-[10px] text-volt-300"><ExternalLink className="size-3" /> Anleitung: Token anlegen (Dashboard → Storage → Blob)</a>
             </div>
             {connectMsg && <p role="status" className="font-mono text-[10px] text-amber-warn">{connectMsg}</p>}
-            <p className="font-mono text-[10px] text-coal-400">Keine URLs, keine Env-Variablen, kein CORS. Nach dem Verbinden lädt dieser Versand automatisch hoch und sendet an Buffer.</p>
+            <p className="font-mono text-[10px] text-coal-400">Alternativ serverseitig: <code>BLOB_READ_WRITE_TOKEN</code> als Server-Umgebungsvariable setzen (auf Vercel automatisch via Storage → Connect), dann neu starten/deployen — das gewinnt vor dem In-App-Token.</p>
           </div>
-          <details><summary className="cursor-pointer text-volt-300">Option A serverseitig (Env-Variablen) — wenn mehrere Browser denselben Host nutzen sollen</summary>
-            <div className="mt-2 grid gap-2">
-              <p>1. Kostenloses Konto auf <a href="https://archive.org" target="_blank" rel="noreferrer" className="text-volt-300 underline">archive.org</a> anlegen (nur E-Mail, keine Zahlungsmethode).</p>
-              <p>2. S3-Schlüssel abrufen: <a href="https://archive.org/account/s3.php" target="_blank" rel="noreferrer" className="text-volt-300 underline">archive.org/account/s3.php</a> → <strong>access key</strong> + <strong>secret key</strong> notieren.</p>
-              <p>3. Zugangsdaten ausschließlich als Server-Umgebungsvariablen setzen (lokal <code>.env.local</code>, auf Vercel Projekteinstellungen), dann neu starten/deployen:</p>
-              <pre className="overflow-x-auto border border-coal-700 bg-coal-950 p-2 text-[10px] text-coal-300">{`S3_ACCESS_KEY_ID=<dein-access-key>
-S3_SECRET_ACCESS_KEY=<dein-secret-key>
-S3_BUCKET=shortsfactory-videos   # Item-Name, wird beim ersten Upload automatisch angelegt
-S3_ENDPOINT=https://s3.us.archive.org`}</pre>
-              <p>4. Diese Seite neu laden — fertig. Kein CORS, kein Bucket-Setup, keine Limits. Details im README unter „Upload-Host“.</p>
-            </div>
-          </details>
-          <details><summary className="cursor-pointer text-volt-300">Option B: S3-kompatibler Bucket (Cloudflare R2 / Backblaze B2 / AWS S3) — schneller, eigene Domain, aber Kontingente</summary>
-            <div className="mt-2 grid gap-2">
-              <p>1. Bucket erstellen und <strong>öffentlichen Lesezugriff</strong> aktivieren (R2: r2.dev-Subdomain oder eigene Domain · B2: Files in bucket are Public · S3: Bucket-Policy für s3:GetObject).</p>
-              <p>2. Diese CORS-Regel im Bucket erlauben (PUT/GET/HEAD von dieser App):</p>
-              <pre className="overflow-x-auto border border-coal-700 bg-coal-950 p-2 text-[10px] text-coal-300">{CORS_SNIPPET}</pre>
-              <p>3. Zugangsdaten ausschließlich als Server-Umgebungsvariablen setzen (lokal <code>.env.local</code>, auf Vercel Projekteinstellungen), dann neu starten/deployen:</p>
-              <pre className="overflow-x-auto border border-coal-700 bg-coal-950 p-2 text-[10px] text-coal-300">{`S3_ACCESS_KEY_ID=…
-S3_SECRET_ACCESS_KEY=…
-S3_BUCKET=…
-S3_REGION=auto            # R2: auto · AWS: z. B. eu-central-1
-S3_ENDPOINT=…             # R2: https://<accountid>.r2.cloudflarestorage.com · B2: https://s3.<region>.backblazeb2.com · AWS: leer
-S3_PUBLIC_BASE_URL=…      # R2: https://pub-<hash>.r2.dev oder eigene Domain · AWS/B2: wird automatisch abgeleitet`}</pre>
-              <p>4. Diese Seite neu laden — der Versand lädt Videos dann selbst hoch. Details stehen im README unter „Upload-Host“.</p>
-            </div>
-          </details>
         </div>}
         <BufferChannels config={config} onChange={setConfig} disabled={submitting} />
         {autoStart && valid && !submitting && <div className="grid gap-2 border border-volt-400/60 bg-volt-400/10 p-4">
@@ -259,15 +208,7 @@ S3_PUBLIC_BASE_URL=…      # R2: https://pub-<hash>.r2.dev oder eigene Domain �
           </button>
         </div>}
         <fieldset disabled={submitting} className="grid min-w-0 gap-3">
-          <legend className="mono-label mb-2 text-coal-300">{uploadMode ? `01 · VIDEOS — WERDEN AUTOMATISCH HOCHGELADEN (${active.length}/${rows.length})` : `01 · VIDEOS & ÖFFENTLICHE LINKS (${active.length}/${rows.length})`}</legend>
-          {!uploadMode && <details className="border border-coal-700 p-3"><summary className="cursor-pointer font-mono text-xs text-volt-300">Mehrere Links auf einmal einfügen</summary>
-            <textarea aria-label="Video-Links, einer pro Zeile" rows={3} value={bulkUrls} onChange={e => setBulkUrls(e.target.value)} placeholder="Ein direkter Video-Link pro Zeile, in der Reihenfolge unten" className={`${inputClass} mt-3`} />
-            <button type="button" onClick={() => {
-              const urls = bulkUrls.split(/\r?\n/).map(u => u.trim()).filter(Boolean);
-              if (urls.length !== rows.length) { setError(`Bitte genau ${rows.length} Links einfügen (einen je Video).`); return; }
-              setRows(rows.map((r, i) => ({ ...r, url: urls[i] }))); setError('');
-            }} className="mt-2 border border-volt-400 px-3 py-2 font-mono text-xs text-volt-300">Links zuordnen</button>
-          </details>}
+          <legend className="mono-label mb-2 text-coal-300">{`01 · VIDEOS — WERDEN AUTOMATISCH HOCHGELADEN (${active.length}/${rows.length})`}</legend>
           {rows.map((r, i) => {
             const up = uploadStateOf(r.item.index);
             return <div key={r.item.index} className="grid gap-3 border border-coal-700 p-3 sm:grid-cols-[72px_1fr]">
@@ -275,7 +216,7 @@ S3_PUBLIC_BASE_URL=…      # R2: https://pub-<hash>.r2.dev oder eigene Domain �
               <div className="grid gap-2">
                 <label className="flex items-center gap-2 font-mono text-xs text-paper-100"><input type="checkbox" style={{ display: 'inline-block' }} checked={r.selected} onChange={e => setRows(rows.map((row, j) => j === i ? { ...row, selected: e.target.checked } : row))} />Video {String(r.item.index + 1).padStart(2, '0')}</label>
                 <input aria-label={`Titel Video ${i + 1}`} value={r.title} onChange={e => setRows(rows.map((row, j) => j === i ? { ...row, title: e.target.value } : row))} className={inputClass} />
-                {uploadMode ? <div className="grid gap-1">
+                <div className="grid gap-1">
                   {up.status === 'done' && r.url ? <>
                     <p className="flex items-center gap-1 font-mono text-[10px] text-volt-300"><Check className="size-3 shrink-0" /> Hochgeladen</p>
                     <a href={r.url} target="_blank" rel="noreferrer" className="flex items-center gap-1 truncate font-mono text-[10px] text-coal-400"><ExternalLink className="size-3 shrink-0" /> {r.url}</a>
@@ -286,20 +227,14 @@ S3_PUBLIC_BASE_URL=…      # R2: https://pub-<hash>.r2.dev oder eigene Domain �
                   </div> : up.status === 'error' ? <p className="font-mono text-[10px] text-rose-err">{up.error}</p> : r.url ? <>
                     <p className="flex items-center gap-1 font-mono text-[10px] text-volt-300"><Check className="size-3 shrink-0" /> Bereits hochgeladen — wird wiederverwendet</p>
                     <a href={r.url} target="_blank" rel="noreferrer" className="flex items-center gap-1 truncate font-mono text-[10px] text-coal-400"><ExternalLink className="size-3 shrink-0" /> {r.url}</a>
-                  </> : <p className="font-mono text-[10px] text-coal-400">Wird beim Start automatisch hochgeladen ({r.item.size ? `${Math.round(r.item.size / 1048576)} MB` : 'Video'}).</p>}
+                  </> : !connected ? <p className="font-mono text-[10px] text-amber-warn">Erst Vercel Blob oben verbinden — danach wird dieses Video automatisch hochgeladen.</p> : <p className="font-mono text-[10px] text-coal-400">Wird beim Start automatisch hochgeladen ({r.item.size ? `${Math.round(r.item.size / 1048576)} MB` : 'Video'}).</p>}
                   {r.url && !submitting && validateVideoUrl(r.url.trim()) && <p className="font-mono text-[10px] text-amber-warn">{validateVideoUrl(r.url.trim())}</p>}
-                </div> : <>
-                  <input type="url" aria-label={`Öffentliche Video-Adresse ${i + 1}`} value={r.url} onChange={e => setRows(rows.map((row, j) => j === i ? { ...row, url: e.target.value } : row))} placeholder="https://dein-host.de/fertiges-video.mp4" className={inputClass} />
-                  {r.url && validateVideoUrl(r.url.trim()) && <p className="font-mono text-[10px] text-amber-warn">{validateVideoUrl(r.url.trim())}</p>}
-                  {r.url && !validateVideoUrl(r.url.trim()) && <a href={r.url.trim()} target="_blank" rel="noreferrer" className="flex items-center gap-1 font-mono text-[10px] text-volt-300"><ExternalLink className="size-3" /> Link zur Kontrolle öffnen</a>}
-                </>}
+                </div>
               </div>
             </div>;
           })}
           {!rows.length && <p className="text-amber-warn">Zuerst mindestens ein Video fertig rendern.</p>}
-          <label className="flex items-start gap-2 font-mono text-xs text-coal-300"><input type="checkbox" style={{ display: 'inline-block' }} checked={consentGiven} onChange={e => ack(e.target.checked)} />{uploadMode
-            ? 'Ich habe verstanden: Die Videos werden in meinen Upload-Host hochgeladen und als echte Posts an Buffer übergeben — je nach Modus sofort veröffentlicht.'
-            : 'Ich habe geprüft: Diese Links liefern die fertigen Videos direkt, ohne Login, und bleiben bis zur Veröffentlichung erreichbar (am besten im privaten Browserfenster testen).'}</label>
+          <label className="flex items-start gap-2 font-mono text-xs text-coal-300"><input type="checkbox" style={{ display: 'inline-block' }} checked={consentGiven} onChange={e => ack(e.target.checked)} />Ich habe verstanden: Die Videos werden in meinen Vercel-Blob-Store hochgeladen und als echte Posts an Buffer übergeben — je nach Modus sofort veröffentlicht.</label>
           {repeatWarnings.length > 0 && <div className="grid gap-2 border border-amber-warn/40 bg-amber-warn/5 p-3">
             <p className="font-mono text-xs text-amber-warn"><AlertTriangle className="mr-1 inline size-3.5" />Laut Journal wurden bereits Posts mit diesen Titeln versendet: {repeatWarnings.join(', ')}. Ein erneuter Versand erzeugt echte Doppelposts.</p>
             <label className="flex items-start gap-2 font-mono text-xs text-coal-300"><input type="checkbox" style={{ display: 'inline-block' }} checked={repeatAck} onChange={e => setRepeatAck(e.target.checked)} />Ich möchte diese Videos bewusst ein zweites Mal senden.</label>
@@ -331,7 +266,7 @@ S3_PUBLIC_BASE_URL=…      # R2: https://pub-<hash>.r2.dev oder eigene Domain �
           {uploadingNow && <>
             <p>HOCHLADEN {Math.min(uploadDone + (currentUpload ? 1 : 0), uploadTotal)}/{uploadTotal} — {currentUpload ? `Video ${String(currentUpload.item.index + 1).padStart(2, '0')}` : ''}</p>
             <progress max={100} value={uploadPercent} className="w-full accent-lime-400" />
-            <p className="text-coal-400">Videos werden direkt in deinen Upload-Host übertragen. Danach startet der Buffer-Versand automatisch.</p>
+            <p className="text-coal-400">Videos werden direkt zu Vercel Blob übertragen. Danach startet der Buffer-Versand automatisch.</p>
           </>}
           {progress && <>
             <p>{progress.message}</p>

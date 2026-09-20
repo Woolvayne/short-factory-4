@@ -1,25 +1,27 @@
 /**
- * One-time-configured upload host: the browser hands finished renders to the
- * configured host and receives the permanent public URL that Buffer gets —
- * no manual link entry ever again.
+ * Upload-Host: Vercel Blob — der einzige Upload-Weg, kein manueller
+ * Link-Eintrag mehr.
  *
- * Two providers (chosen once via server env, see api/upload.js):
- * - "s3"  (Cloudflare R2 / Backblaze B2 / AWS S3 / MinIO): presigned PUT,
- *   the video streams browser → bucket directly.
- * - "ia"  (Internet Archive — free, no caps, no payment method): chunked
- *   same-origin relay (4 MB parts → /api/upload → IA multipart). No CORS
- *   setup needed; the IA key never reaches the browser on this path. If the
- *   relay fails (e.g. IA rejects small parts), a browser-direct PUT with
- *   header auth is attempted once as fallback.
+ * Ablauf pro Video:
+ *   1. Browser fragt /api/upload nach einem eingeschränkten Client-Token
+ *      (Blob-Client-Protokoll, Pfad-Guard shortsfactory/*, nur MP4/WebM,
+ *      max 2 GB, addRandomSuffix).
+ *   2. Browser lädt die Datei mit diesem Token DIREKT zu Vercel Blob hoch
+ *      (PUT https://vercel.com/api/blob) — das Read/Write-Token berührt den
+ *      Upload nicht und verlässt Server bzw. eigenen Browser nie.
+ *   3. Vercel liefert die permanente öffentliche URL zurück; die bekommt Buffer.
+ *
+ * Das Read/Write-Token kommt entweder aus der Server-Umgebung
+ * (BLOB_READ_WRITE_TOKEN, automatisch injiziert via Storage → Connect) oder
+ * wurde einmal im Versandfenster eingefügt — dann liegt es nur im
+ * localStorage dieses Browsers (selbes Modell wie die AI-Keys).
  */
 
-export type UploadProvider = 's3' | 'ia';
+export type UploadProvider = 'vblob';
 
 export interface UploadHostStatus {
   configured: boolean;
   provider?: UploadProvider | null;
-  bucket?: string | null;
-  publicBase?: string | null;
 }
 
 export interface UploadProgress {
@@ -27,32 +29,25 @@ export interface UploadProgress {
   total: number;
 }
 
-/** Keys pasted once in the app; stored in this browser's localStorage only (like the AI keys). */
-export interface IaCredentials {
-  accessKey: string;
-  secretKey: string;
-  item: string;
-}
+const BLOB_TOKEN_KEY = 'shortsfactory.blob_token.v1';
+const BLOB_API = 'https://vercel.com/api/blob'; // Vercel Blob store router
+const API_VERSION = '11'; // wire version of the client-upload protocol
 
-const IA_CREDS_KEY = 'shortsfactory.ia_creds.v1';
-
-export function loadIaCredentials(): IaCredentials | null {
+/** Token pasted once in the app; stored in this browser's localStorage only. */
+export function loadBlobToken(): string | null {
   try {
-    const raw = JSON.parse(localStorage.getItem(IA_CREDS_KEY) || 'null');
-    if (raw && typeof raw.accessKey === 'string' && typeof raw.secretKey === 'string' && typeof raw.item === 'string'
-      && raw.accessKey.trim() && raw.secretKey.trim() && raw.item.trim()) {
-      return { accessKey: raw.accessKey.trim(), secretKey: raw.secretKey.trim(), item: raw.item.trim() };
-    }
-  } catch { /* private mode / corrupt */ }
+    const token = String(localStorage.getItem(BLOB_TOKEN_KEY) || '').trim();
+    return token || null;
+  } catch { /* private mode */ }
   return null;
 }
 
-export function saveIaCredentials(creds: IaCredentials) {
-  try { localStorage.setItem(IA_CREDS_KEY, JSON.stringify(creds)); } catch { /* private mode */ }
+export function saveBlobToken(token: string) {
+  try { localStorage.setItem(BLOB_TOKEN_KEY, token.trim()); } catch { /* private mode */ }
 }
 
-export function clearIaCredentials() {
-  try { localStorage.removeItem(IA_CREDS_KEY); } catch { /* private mode */ }
+export function clearBlobToken() {
+  try { localStorage.removeItem(BLOB_TOKEN_KEY); } catch { /* private mode */ }
 }
 
 export async function fetchUploadStatus(signal?: AbortSignal): Promise<UploadHostStatus> {
@@ -61,42 +56,28 @@ export async function fetchUploadStatus(signal?: AbortSignal): Promise<UploadHos
   const data = await res.json();
   return {
     configured: Boolean(data?.configured),
-    provider: data?.provider === 'ia' ? 'ia' : 's3',
-    bucket: data?.bucket ?? null,
-    publicBase: data?.publicBase ?? null,
+    provider: data?.provider === 'vblob' ? 'vblob' : null,
   };
-}
-
-interface SignResponse {
-  provider: 's3' | 'ia';
-  uploadUrl?: string;
-  publicUrl: string;
-  publicUrlS3?: string;
-  key: string;
-  uploadId?: string;
-  partSize?: number;
-  note?: string;
-  headers?: Record<string, string>;
 }
 
 async function postAction(
   payload: Record<string, unknown>,
   signal?: AbortSignal,
-  creds?: IaCredentials | null
-): Promise<SignResponse & { ok?: boolean; etag?: string; error?: string; item?: string }> {
-  const body = creds
-    ? { ...payload, iaAccessKey: creds.accessKey, iaSecretKey: creds.secretKey, iaItem: creds.item }
-    : payload;
+  blobToken?: string | null
+): Promise<{ ok?: boolean; clientToken?: string; error?: string }> {
   let res: Response;
   try {
     res = await fetch('/api/upload', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
+      headers: {
+        'Content-Type': 'application/json',
+        ...(blobToken ? { 'x-sf-blob-token': blobToken } : {}),
+      },
+      body: JSON.stringify(payload),
       signal,
     });
   } catch {
-    throw new Error('Upload-Host (Relay) nicht erreichbar.');
+    throw new Error('Upload-Host nicht erreichbar.');
   }
   const data = await res.json().catch(() => null);
   if (!res.ok || !data || data.error) {
@@ -105,81 +86,118 @@ async function postAction(
   return data;
 }
 
-/** Credential check for the in-app connect form — creates or changes nothing. */
-export async function checkIaCredentials(creds: IaCredentials, signal?: AbortSignal): Promise<{ ok: boolean; error?: string; item?: string }> {
-  const result = await postAction({ action: 'ia-check' }, signal, creds);
-  return { ok: Boolean(result?.ok), error: result?.error, item: result?.item };
+/** Token check for the in-app connect form — creates or changes nothing. */
+export async function checkBlobToken(token: string, signal?: AbortSignal): Promise<{ ok: boolean; error?: string }> {
+  const result = await postAction({ action: 'vblob-check', blobToken: token }, signal, token);
+  return { ok: Boolean(result?.ok), error: result?.error };
 }
 
-function xhrPut(url: string, headers: Record<string, string>, body: Blob, signal: AbortSignal | undefined, onProgress?: (p: UploadProgress) => void): Promise<void> {
+/** Flat, collision-safe Vercel-Blob path inside the app lane: shortsfactory/<stamp>-<rand>-<file>. */
+function buildBlobPathname(filename: string): string {
+  const base = String(filename || '').split(/[\\/]/).pop()!.trim();
+  const cleaned = base.replace(/[^\w.\- ]+/g, '_').replace(/\.{2,}/g, '_').replace(/^\.+/, '').replace(/\s+/g, '-').slice(0, 80);
+  const safe = cleaned && /\.\w{2,5}$/.test(cleaned) ? cleaned : `${cleaned || 'video'}.mp4`;
+  const stamp = new Date().toISOString().replace(/[:-]|\.\d{3}/g, ''); // YYYYMMDDTHHMMSSZ
+  const rand = Math.random().toString(16).slice(2, 10).padEnd(8, '0');
+  return `shortsfactory/${stamp}-${rand}-${safe}`;
+}
+
+/** Plain-language errors out of Vercel Blob's JSON error shape (German operator UI). */
+function blobErrorText(status: number, bodyText: string): string {
+  let code = '';
+  try { code = JSON.parse(bodyText)?.error?.code || ''; } catch { /* not JSON */ }
+  if (status === 401 || status === 403 || code === 'unauthorized' || code === 'forbidden') {
+    return 'Vercel Blob hat den Upload abgelehnt — Token ungültig oder abgelaufen. Bitte Vercel Blob im Versandfenster neu verbinden.';
+  }
+  if (status === 404 || status === 410 || code === 'not_found' || code === 'store_not_found') {
+    return 'Der Blob-Store wurde nicht gefunden oder ist pausiert — bitte im Vercel-Dashboard prüfen.';
+  }
+  if (code === 'file_too_large') return 'Die Datei ist zu groß (Limit dieser App: 2 GB).';
+  if (code === 'content_type_not_allowed') return 'Nur MP4- oder WebM-Videos sind erlaubt.';
+  if (code === 'client_token_expired') return 'Das Upload-Token ist abgelaufen — bitte erneut versuchen.';
+  if (status >= 500 || code === 'service_unavailable' || code === 'internal_server_error') {
+    return 'Vercel Blob meldet einen Serverfehler — bitte später erneut versuchen.';
+  }
+  return `Vercel Blob hat HTTP ${status} gemeldet${code ? ` (${code})` : ''}.`;
+}
+
+/**
+ * Step 2 of the Vercel-Blob path: PUT the file browser-direct with the client
+ * token (XHR so progress stays measurable), resolve with the permanent URL.
+ */
+function putToVercelBlob(
+  pathname: string,
+  clientToken: string,
+  file: Blob,
+  contentType: string,
+  signal: AbortSignal | undefined,
+  onProgress?: (p: UploadProgress) => void
+): Promise<string> {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
-    xhr.open('PUT', url);
-    for (const [name, value] of Object.entries(headers)) xhr.setRequestHeader(name, value);
+    xhr.open('PUT', `${BLOB_API}/?pathname=${encodeURIComponent(pathname)}`);
+    xhr.setRequestHeader('authorization', `Bearer ${clientToken}`);
+    xhr.setRequestHeader('x-api-version', API_VERSION);
+    xhr.setRequestHeader('x-content-type', contentType);
     xhr.upload.onprogress = (e) => {
       if (e.lengthComputable) onProgress?.({ loaded: e.loaded, total: e.total });
     };
     xhr.onload = () => {
-      if (xhr.status >= 200 && xhr.status < 300) resolve();
-      else reject(new Error(`Upload-Host hat HTTP ${xhr.status} gemeldet.`));
+      if (xhr.status >= 200 && xhr.status < 300) {
+        try {
+          const data = JSON.parse(xhr.responseText || '{}');
+          if (typeof data.url === 'string' && data.url) { resolve(data.url); return; }
+        } catch { /* fall through */ }
+        reject(new Error('Vercel Blob hat keine öffentliche Adresse gemeldet.'));
+        return;
+      }
+      reject(new Error(blobErrorText(xhr.status, xhr.responseText || '')));
     };
-    xhr.onerror = () =>
-      reject(new Error('Upload fehlgeschlagen — der Host blockiert Browser-Uploads (CORS) oder ist nicht erreichbar.'));
+    xhr.onerror = () => reject(new Error('Upload fehlgeschlagen — Vercel Blob ist vom Browser aus nicht erreichbar (Netzwerk/CORS).'));
     xhr.onabort = () => reject(new DOMException('Upload abgebrochen.', 'AbortError'));
     const onAbort = () => xhr.abort();
     signal?.addEventListener('abort', onAbort, { once: true });
     xhr.onloadend = () => signal?.removeEventListener('abort', onAbort);
-    xhr.send(body);
+    xhr.send(file);
   });
 }
 
-/** IA via same-origin relay: init → 4 MB parts → complete. Key stays server-side unless local creds are used. */
-async function iaRelayUpload(
-  signed: SignResponse,
+/**
+ * The whole Vercel-Blob path for one rendered video: ask /api/upload for a
+ * constrained client token, PUT browser-direct, resolve with the permanent
+ * public URL. The upload must fully succeed before anything is sent to Buffer.
+ */
+export async function uploadViaVercelBlob(
   file: Blob,
-  opts: { signal?: AbortSignal; onProgress?: (p: UploadProgress) => void; iaCreds?: IaCredentials | null }
-): Promise<string> {
-  const { key, uploadId } = signed;
-  const partSize = signed.partSize ?? 4 * 1024 * 1024;
-  if (!key || !uploadId) throw new Error('Upload-Host hat keine Upload-ID gemeldet.');
-  const credHeaders: Record<string, string> = opts.iaCreds
-    ? { 'x-sf-ia-access': opts.iaCreds.accessKey, 'x-sf-ia-secret': opts.iaCreds.secretKey, 'x-sf-ia-item': opts.iaCreds.item }
-    : {};
-  const parts: { partNumber: number; etag: string }[] = [];
-  const total = file.size;
-  let loaded = 0;
-  for (let partNumber = 1, offset = 0; offset < total; partNumber++, offset += partSize) {
-    const slice = file.slice(offset, Math.min(offset + partSize, total));
-    let etag = '';
-    for (let attempt = 1; attempt <= 2; attempt++) {
-      try {
-        const q = `action=ia-part&key=${encodeURIComponent(key)}&uploadId=${encodeURIComponent(uploadId)}&partNumber=${partNumber}`;
-        const res = await fetch(`/api/upload?${q}`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/octet-stream', ...credHeaders },
-          body: slice,
-          signal: opts.signal,
-        });
-        const data = await res.json().catch(() => null);
-        if (!res.ok || !data?.etag) throw new Error(data?.error || `Upload-Teil ${partNumber} fehlgeschlagen (HTTP ${res.status}).`);
-        etag = data.etag;
-        break;
-      } catch (e) {
-        if (opts.signal?.aborted || (e instanceof DOMException && e.name === 'AbortError')) throw e;
-        if (attempt === 2) throw e;
-      }
-    }
-    parts.push({ partNumber, etag });
-    loaded += slice.size;
-    opts.onProgress?.({ loaded, total });
+  opts: {
+    filename: string;
+    contentType: string;
+    signal?: AbortSignal;
+    onProgress?: (progress: UploadProgress) => void;
   }
-  const done = await postAction({ action: 'ia-complete', key, uploadId, parts }, opts.signal, opts.iaCreds);
-  return done.publicUrl || signed.publicUrl;
+): Promise<string> {
+  const blobToken = loadBlobToken();
+  const pathname = buildBlobPathname(opts.filename);
+  const { clientToken } = await postAction(
+    { type: 'blob.generate-client-token', payload: { pathname, clientPayload: null, multipart: false } },
+    opts.signal,
+    blobToken
+  );
+  if (!clientToken || !clientToken.startsWith('vercel_blob_client_')) {
+    throw new Error('Upload-Host hat kein gültiges Upload-Token geliefert.');
+  }
+  try {
+    // Exactly the pathname the token was issued for — Vercel rejects mismatches.
+    return await putToVercelBlob(pathname, clientToken, file, opts.contentType.toLowerCase(), opts.signal, opts.onProgress);
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    throw new Error(`${message} Es wurde noch nichts an Buffer gesendet.`);
+  }
 }
 
 /**
- * Sign + upload one rendered video. Resolves with the permanent public URL;
- * the upload must fully succeed before anything is sent to Buffer.
+ * Upload one rendered video — Vercel Blob only. Resolves with the permanent
+ * public URL. Throws a clear German error when nothing is connected.
  */
 export async function uploadRenderFile(
   file: Blob,
@@ -188,45 +206,12 @@ export async function uploadRenderFile(
     contentType: string;
     signal?: AbortSignal;
     onProgress?: (progress: UploadProgress) => void;
-    iaCreds?: IaCredentials | null;
   }
 ): Promise<string> {
-  const signed = await postAction(
-    { action: 'sign', filename: opts.filename, contentType: opts.contentType, size: file.size },
-    opts.signal,
-    opts.iaCreds
-  );
-
-  if (signed.provider === 'ia') {
-    try {
-      return await iaRelayUpload(signed, file, opts);
-    } catch (e) {
-      if (opts.signal?.aborted || (e instanceof DOMException && e.name === 'AbortError')) throw e;
-      // Fallback: single browser-direct PUT with header auth (needs IA CORS).
-      let direct: SignResponse;
-      try {
-        direct = await postAction({ action: 'ia-direct', filename: opts.filename, contentType: opts.contentType, size: file.size }, opts.signal, opts.iaCreds);
-      } catch {
-        throw e; // relay error is the more specific one
-      }
-      try {
-        await xhrPut(direct.uploadUrl!, direct.headers ?? {}, file, opts.signal, opts.onProgress);
-        return direct.publicUrl || signed.publicUrl;
-      } catch (e2) {
-        throw new Error(`Upload in das Internet Archive fehlgeschlagen (Relay: ${e instanceof Error ? e.message : e} · Direkt: ${e2 instanceof Error ? e2.message : e2}). Es wurde noch nichts an Buffer gesendet.`);
-      }
-    }
+  if (!loadBlobToken()) {
+    // No in-app token → only the server env can still be connected.
+    const status = await fetchUploadStatus(opts.signal).catch(() => null);
+    if (!status?.configured) throw new Error('Bitte erst Vercel Blob im Versandfenster verbinden.');
   }
-
-  if (!signed.uploadUrl) throw new Error('Upload-Host hat keine signierte Adresse geliefert.');
-  try {
-    // content-type is part of the presigned signature — send exactly what was signed.
-    await xhrPut(signed.uploadUrl, { 'Content-Type': opts.contentType.toLowerCase() }, file, opts.signal, opts.onProgress);
-  } catch (e) {
-    const message = e instanceof Error ? e.message : String(e);
-    throw new Error(
-      `${message.includes('CORS') ? 'Upload fehlgeschlagen — prüfe die CORS-Freigabe (PUT) des Buckets.' : message} Es wurde noch nichts an Buffer gesendet.`
-    );
-  }
-  return signed.publicUrl;
+  return uploadViaVercelBlob(file, opts);
 }

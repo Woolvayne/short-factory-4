@@ -4,7 +4,7 @@
  * Two legal, CORS-honest ways to feed it:
  *   a) pick a long video from this device (camera roll / Files)
  *   b) paste a DIRECT video URL (…/something.mp4) that sends CORS headers —
- *      your own hosting, an S3/R2 bucket, Pexels/Coverr/Mixkit downloads, etc.
+ *      your own hosting, Pexels/Coverr/Mixkit downloads, etc.
  *
  * Platform page links (YouTube, TikTok, Instagram, …) are deliberately NOT
  * ripped: browsers cannot fetch those streams (no CORS, signed URLs), and
@@ -68,7 +68,7 @@ export function detectPlatform(url: string): PlatformInfo | null {
             "Your own video? Download the original in YouTube Studio → Content → ⋮ → Download.",
             "Creative-Commons or licensed footage? Grab the file from the rights holder / stock site.",
             "Then drop that file into the picker on the left — it gets sliced into 10 clips automatically.",
-            "Or paste a DIRECT .mp4 link (your own hosting, S3/R2, Pexels, Coverr, Mixkit).",
+            "Or paste a DIRECT .mp4 link (your own hosting, Pexels, Coverr, Mixkit).",
           ]
         : [
             `Export or download the file from ${hit.platform} only if it is yours or licensed to you.`,

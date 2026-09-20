@@ -18,18 +18,16 @@ export function localApi(): Plugin {
         const apiModule = endpoint ? API_MODULES[endpoint] : undefined;
         if (!apiModule) return next();
         try {
-          const isBinary = String(req.headers['content-type'] || '').includes('octet-stream');
-          const maxBytes = isBinary ? 6 * 1024 * 1024 : 1024 * 1024; // upload chunks arrive raw
+          // API routes are pure JSON — no binary passthrough.
+          const maxBytes = 1024 * 1024;
           let raw = '';
-          const chunks: Buffer[] = [];
           let total = 0;
           for await (const chunk of req) {
             total += chunk.length;
             if (total > maxBytes) { res.statusCode = 413; res.end('Request too large'); return; }
-            if (isBinary) chunks.push(Buffer.from(chunk));
-            else raw += chunk;
+            raw += chunk;
           }
-          const parsedBody = isBinary ? Buffer.concat(chunks) : raw ? JSON.parse(raw) : undefined;
+          const parsedBody = raw ? JSON.parse(raw) : undefined;
           const request = Object.assign(req, { body: parsedBody });
           const response = Object.assign(res, {
             status(code: number) { res.statusCode = code; return response; },
