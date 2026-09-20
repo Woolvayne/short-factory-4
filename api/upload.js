@@ -2,30 +2,43 @@
  * Upload-Host relay — the "middle way" so no public link ever has to be typed by hand.
  *
  * Buffer's API cannot receive file uploads; it needs a permanent, public HTTPS URL
- * for every video. This route is wired ONCE to any S3-compatible bucket
- * (Cloudflare R2, Backblaze B2, AWS S3, MinIO …) via server environment variables.
- * Afterwards the browser gets a short-lived presigned PUT URL here and uploads each
- * finished render straight to the bucket — the video never flows through this server
- * (serverless body limits stay irrelevant) — and the app receives the permanent
- * public URL that is then handed to Buffer.
+ * for every video. This route is wired ONCE via server environment variables and
+ * supports two kinds of hosts:
+ *
+ * 1. Internet Archive (archive.org) — completely free, no storage or bandwidth
+ *    caps, no payment method, permanent public URLs. Provider "ia".
+ *    S3_ENDPOINT=https://s3.us.archive.org, S3_BUCKET=<item name> (auto-created
+ *    on first upload). Docs: https://archive.org/developers/ias3.html
+ *
+ * 2. Any S3-compatible bucket (Cloudflare R2, Backblaze B2, AWS S3, MinIO) —
+ *    provider "s3", presigned PUT URLs (SigV4).
+ *
+ * The browser never needs CORS on the host: for the Internet Archive the video
+ * is streamed through this relay in ~4 MB chunks (same-origin!) and assembled
+ * via IA multipart upload; presigned S3 uploads go browser-direct. Videos never
+ * sit on this server — chunks pass through memory only.
  *
  * Required env (server-side only, never VITE_):
  *   S3_ACCESS_KEY_ID, S3_SECRET_ACCESS_KEY, S3_BUCKET
  * Optional:
- *   S3_REGION          default "auto" (R2). AWS: e.g. "eu-central-1".
- *   S3_ENDPOINT        e.g. https://<accountid>.r2.cloudflarestorage.com (R2)
- *                      or https://s3.us-west-004.backblazeb2.com (B2). AWS: leave empty.
- *   S3_PUBLIC_BASE_URL e.g. https://pub-<hash>.r2.dev or a custom domain.
- *                      Derived automatically for AWS and B2 friendly URLs.
- * The bucket must allow the app origin via CORS (PUT/GET/HEAD) — see README.
+ *   S3_ENDPOINT        ia: https://s3.us.archive.org
+ *                      r2: https://<accountid>.r2.cloudflarestorage.com · b2: https://s3.<region>.backblazeb2.com · aws: leave empty
+ *   S3_REGION          default "auto" (R2/IA). AWS: e.g. "eu-central-1".
+ *   S3_PUBLIC_BASE_URL only for S3 hosts without derivable public URL (e.g. R2);
+ *                      IA always derives https://archive.org/download/<item>.
+ * The S3 bucket must allow the app origin via CORS (PUT/GET/HEAD) — see README.
+ * The Internet Archive needs no CORS configuration at all.
  */
 import { createHash, createHmac, randomBytes } from 'node:crypto';
 
-export const config = { runtime: 'nodejs', maxDuration: 30 };
+export const config = { runtime: 'nodejs', maxDuration: 60 };
 
 const SIGN_TTL = 900; // seconds — upload must start within 15 minutes
 const MAX_BYTES = 2 * 1024 * 1024 * 1024; // 2 GB sanity cap
+const PART_SIZE = 4 * 1024 * 1024; // relay chunk size; stays under Vercel's 4.5 MB body limit
 const CONTENT_TYPES = { 'video/mp4': '.mp4', 'video/webm': '.webm', 'video/quicktime': '.mov', 'video/x-m4v': '.m4v' };
+const IA_S3 = 'https://s3.us.archive.org';
+const KEY_RE = /^\d{8}-\d{8}T\d{6}Z-[0-9a-f]{8}-[A-Za-z0-9._-]+$/;
 
 class UploadError extends Error {
   constructor(message, status = 400) { super(message); this.status = status; }
@@ -44,6 +57,23 @@ export function uploadEnv() {
 
 export function uploadHostConfigured(e = uploadEnv()) {
   return Boolean(e.accessKeyId && e.secretAccessKey && e.bucket);
+}
+
+function hostOf(endpoint) {
+  try { return new URL(endpoint).hostname.toLowerCase(); } catch { return ''; }
+}
+
+/** "ia" when S3_ENDPOINT points at the Internet Archive, otherwise "s3". */
+export function providerOf(e = uploadEnv()) {
+  return /(^|\.)archive\.org$/.test(hostOf(e.endpoint)) ? 'ia' : 's3';
+}
+
+/** Item identifiers: 3–80 chars, letters/digits/._-, no "--" (reserved by IA). */
+export function validateIaItem(item) {
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{2,79}$/.test(item) || item.includes('--')) {
+    return 'Der Internet-Archive-Item-Name (S3_BUCKET) muss 3–80 Zeichen lang sein (Buchstaben, Zahlen, . _ -) und kein doppeltes Bindestrichpaar enthalten.';
+  }
+  return '';
 }
 
 /** RFC 3986 percent-encoding, as required by SigV4 (stricter than encodeURIComponent). */
@@ -75,12 +105,166 @@ export function presignPut({ host, canonicalUri, accessKeyId, secretAccessKey, r
   return `https://${host}${canonicalUri}?${query}&X-Amz-Signature=${signature}`;
 }
 
-/** Strip everything that could escape the shortsfactory/ prefix or break URLs. */
+/** Strip everything that could escape the prefix, break URLs or create IA derived-file collisions. */
 export function sanitizeFileName(filename, fallbackExt = '.mp4') {
   const base = String(filename || '').split(/[\\/]/).pop().trim();
   const cleaned = base.replace(/[^\w.\- ]+/g, '_').replace(/\.{2,}/g, '_').replace(/^\.+/, '').replace(/\s+/g, '-').slice(0, 80);
   const safe = cleaned && /\.\w{2,5}$/.test(cleaned) ? cleaned : `${cleaned || 'video'}${fallbackExt}`;
   return safe || `video${fallbackExt}`;
+}
+
+function validateMedia(contentType, size) {
+  if (typeof contentType !== 'string' || !CONTENT_TYPES[contentType.toLowerCase()]) {
+    throw new UploadError('Nur MP4- (video/mp4) oder WebM-Videos (video/webm) können hochgeladen werden.');
+  }
+  if (!Number.isInteger(size) || size < 1 || size > MAX_BYTES) {
+    throw new UploadError('Ungültige Dateigröße für den Upload.');
+  }
+  return CONTENT_TYPES[contentType.toLowerCase()];
+}
+
+function assertConfigured(e) {
+  if (!uploadHostConfigured(e)) {
+    throw new UploadError('Kein Upload-Host eingerichtet. Bitte S3_ACCESS_KEY_ID, S3_SECRET_ACCESS_KEY und S3_BUCKET als Server-Umgebungsvariablen setzen.', 503);
+  }
+}
+
+/** Flat, collision-safe, IA-safe object key: <date>-<time>-<rand>-<file> (no slashes). */
+export function buildIaKey(filename, contentType) {
+  const ext = CONTENT_TYPES[contentType.toLowerCase()];
+  const stamp = new Date().toISOString().replace(/[:-]|\.\d{3}/g, ''); // YYYYMMDDTHHMMSSZ
+  return `${stamp.slice(0, 8)}-${stamp}-${randomBytes(4).toString('hex')}-${sanitizeFileName(filename, ext)}`;
+}
+
+const iaAuth = e => `LOW ${e.accessKeyId}:${e.secretAccessKey}`;
+const iaUrl = (e, key, query = '') => `${IA_S3}/${encodeURIComponent(e.bucket)}/${encodeURIComponent(key)}${query}`;
+
+/** Metadata headers are applied when IA auto-creates the item; harmless afterwards. */
+function iaHeaders(e, extra = {}) {
+  return {
+    Authorization: iaAuth(e),
+    'x-archive-auto-make-bucket': '1',
+    'x-amz-auto-make-bucket': '1',
+    'x-archive-interactive-priority': '1',
+    'x-archive-meta01-collection': 'opensource_movies',
+    'x-archive-meta-mediatype': 'movies',
+    'x-archive-meta-title': e.bucket,
+    ...extra,
+  };
+}
+
+async function iaFail(res) {
+  let detail = '';
+  try { detail = (await res.text()).slice(0, 200); } catch { /* ignore */ }
+  if (res.status === 503) {
+    return new UploadError('Das Internet Archive ist gerade überlastet (503 SlowDown). Bitte in wenigen Minuten erneut versuchen.', 503);
+  }
+  return new UploadError(`Internet Archive: HTTP ${res.status}${detail ? ` — ${detail}` : ''}`, res.status >= 500 ? 502 : res.status);
+}
+
+const extractUploadId = xml => /<UploadId>([^<]+)<\/UploadId>/.exec(xml)?.[1] || '';
+
+/**
+ * IA flow, step 1 — start a multipart upload. Returns key/uploadId/public URLs.
+ * The item is auto-created by IA on the first upload (no manual item setup).
+ */
+export async function iaInitUpload({ filename, contentType, size } = {}, e = uploadEnv()) {
+  assertConfigured(e);
+  if (providerOf(e) !== 'ia') throw new UploadError('ia-init ist nur mit dem Internet-Archive-Endpunkt möglich.', 400);
+  const itemError = validateIaItem(e.bucket);
+  if (itemError) throw new UploadError(itemError, 500);
+  validateMedia(contentType, size);
+  const key = buildIaKey(filename, contentType);
+  const res = await fetch(iaUrl(e, key, '?uploads'), {
+    method: 'POST',
+    headers: iaHeaders(e, { 'x-archive-size-hint': String(size) }),
+    signal: AbortSignal.timeout(45000),
+  }).catch(() => { throw new UploadError('Internet Archive nicht erreichbar. Bitte später erneut versuchen.', 502); });
+  if (!res.ok) throw await iaFail(res);
+  const uploadId = extractUploadId(await res.text());
+  if (!uploadId) throw new UploadError('Internet Archive hat keine Upload-ID bestätigt.', 502);
+  return {
+    provider: 'ia', key, uploadId, partSize: PART_SIZE,
+    publicUrl: `https://archive.org/download/${e.bucket}/${encodeURIComponent(key)}`,
+    publicUrlS3: iaUrl(e, key),
+  };
+}
+
+/** IA flow, step 2 — stream one part through the relay (binary body, no CORS involved). */
+export async function iaUploadPart({ key, uploadId, partNumber, body } = {}, e = uploadEnv()) {
+  assertConfigured(e);
+  if (typeof key !== 'string' || !KEY_RE.test(key)) throw new UploadError('Ungültiger Objekt-Schlüssel.');
+  if (typeof uploadId !== 'string' || !/^[\w.\-]{6,300}$/.test(uploadId)) throw new UploadError('Ungültige Upload-ID.');
+  if (!Number.isInteger(partNumber) || partNumber < 1 || partNumber > 10000) throw new UploadError('Ungültige Teilenummer.');
+  const buf = Buffer.isBuffer(body) ? body : body instanceof Uint8Array ? Buffer.from(body) : body ? Buffer.from(body) : null;
+  if (!buf || buf.length < 1 || buf.length > PART_SIZE) throw new UploadError('Ungültige Teilgröße (max. 4 MB).');
+  const res = await fetch(iaUrl(e, key, `?partNumber=${partNumber}&uploadId=${encodeURIComponent(uploadId)}`), {
+    method: 'PUT',
+    headers: { Authorization: iaAuth(e) },
+    body: new Uint8Array(buf),
+    signal: AbortSignal.timeout(55000),
+  }).catch(() => { throw new UploadError('Verbindung zum Internet Archive unterbrochen. Bitte erneut versuchen.', 502); });
+  if (!res.ok) throw await iaFail(res);
+  const etag = res.headers.get('etag');
+  if (!etag) throw new UploadError('Internet Archive hat kein ETag für den Upload-Teil gemeldet.', 502);
+  return { etag };
+}
+
+function escapeXml(value) {
+  return String(value).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&apos;' }[c]));
+}
+
+/** IA flow, step 3 — complete the multipart upload and pick a public URL that is already live. */
+export async function iaCompleteUpload({ key, uploadId, parts } = {}, e = uploadEnv()) {
+  assertConfigured(e);
+  if (typeof key !== 'string' || !KEY_RE.test(key)) throw new UploadError('Ungültiger Objekt-Schlüssel.');
+  if (typeof uploadId !== 'string' || !/^[\w.\-]{6,300}$/.test(uploadId)) throw new UploadError('Ungültige Upload-ID.');
+  if (!Array.isArray(parts) || !parts.length || parts.some(p => !Number.isInteger(p?.partNumber) || typeof p?.etag !== 'string' || !p.etag)) {
+    throw new UploadError('Ungültige Teil-Liste für den Upload-Abschluss.');
+  }
+  const xml = `<CompleteMultipartUpload>${parts.map(p => `<Part><PartNumber>${p.partNumber}</PartNumber><ETag>${escapeXml(p.etag)}</ETag></Part>`).join('')}</CompleteMultipartUpload>`;
+  const res = await fetch(iaUrl(e, key, `?uploadId=${encodeURIComponent(uploadId)}`), {
+    method: 'POST',
+    headers: iaHeaders(e, { 'Content-Type': 'application/xml' }),
+    body: xml,
+    signal: AbortSignal.timeout(55000),
+  }).catch(() => { throw new UploadError('Verbindung zum Internet Archive unterbrochen. Bitte erneut versuchen.', 502); });
+  if (!res.ok) throw await iaFail(res);
+  const publicUrlS3 = iaUrl(e, key);
+  const publicUrlDownload = `https://archive.org/download/${e.bucket}/${encodeURIComponent(key)}`;
+  // Prefer the URL that already answers; IA needs a moment for ingestion sometimes.
+  for (const [url, waitMs] of [[publicUrlS3, 4000], [publicUrlS3, 6000]]) {
+    if (await headOk(url)) return { ok: true, publicUrl: url, publicUrlDownload };
+    await new Promise(resolve => setTimeout(resolve, waitMs));
+  }
+  return { ok: true, publicUrl: publicUrlDownload, publicUrlDownload, note: 'Datei wird noch vom Internet Archive eingespeist; der Link ist in wenigen Minuten abrufbar.' };
+}
+
+async function headOk(url) {
+  try {
+    const res = await fetch(url, { method: 'HEAD', signal: AbortSignal.timeout(15000) });
+    return res.ok;
+  } catch { return false; }
+}
+
+/**
+ * Fallback for the IA: sign a browser-direct PUT with LOW header auth (used only
+ * when the relay path fails). NOTE: this deliberately hands the IA key to the
+ * operator's own browser — this app must run behind access protection anyway.
+ */
+export function iaDirectUpload({ filename, contentType, size } = {}, e = uploadEnv()) {
+  assertConfigured(e);
+  const itemError = validateIaItem(e.bucket);
+  if (itemError) throw new UploadError(itemError, 500);
+  const ext = validateMedia(contentType, size);
+  const key = buildIaKey(filename, contentType);
+  return {
+    provider: 'ia-direct',
+    uploadUrl: iaUrl(e, key),
+    headers: { ...iaHeaders(e), 'Content-Type': contentType.toLowerCase(), 'x-archive-size-hint': String(size) },
+    publicUrl: `https://archive.org/download/${e.bucket}/${encodeURIComponent(key)}`,
+    publicUrlS3: iaUrl(e, key),
+  };
 }
 
 function derivePublicBase(e) {
@@ -92,8 +276,8 @@ function derivePublicBase(e) {
     } catch { throw new UploadError('S3_PUBLIC_BASE_URL muss eine https://-Adresse sein.', 500); }
   }
   if (!e.endpoint) return `https://${e.bucket}.s3.${e.region}.amazonaws.com`; // AWS virtual-host style
-  let host;
-  try { host = new URL(e.endpoint).hostname.toLowerCase(); } catch { throw new UploadError('S3_ENDPOINT ist keine gültige URL.', 500); }
+  const host = hostOf(e.endpoint);
+  if (!host) throw new UploadError('S3_ENDPOINT ist keine gültige URL.', 500);
   const b2 = /^s3\.([a-z0-9-]+)\.backblazeb2\.com$/.exec(host); // e.g. s3.us-west-004.backblazeb2.com
   if (b2) {
     const net = /-(\d{3})$/.exec(b2[1]); // region like "us-west-004" → friendly host f004.us-west-004
@@ -103,16 +287,10 @@ function derivePublicBase(e) {
 }
 
 export function buildUploadTarget({ filename, contentType, size } = {}, e = uploadEnv()) {
-  if (!uploadHostConfigured(e)) {
-    throw new UploadError('Kein Upload-Host eingerichtet. Bitte S3_ACCESS_KEY_ID, S3_SECRET_ACCESS_KEY und S3_BUCKET als Server-Umgebungsvariablen setzen.', 503);
-  }
-  if (typeof contentType !== 'string' || !CONTENT_TYPES[contentType.toLowerCase()]) {
-    throw new UploadError('Nur MP4- (video/mp4) oder WebM-Videos (video/webm) können hochgeladen werden.');
-  }
-  if (!Number.isInteger(size) || size < 1 || size > MAX_BYTES) {
-    throw new UploadError('Ungültige Dateigröße für den Upload.');
-  }
-  const safeName = sanitizeFileName(filename, CONTENT_TYPES[contentType.toLowerCase()]);
+  assertConfigured(e);
+  if (providerOf(e) === 'ia') return iaDirectUpload({ filename, contentType, size }, e);
+  const ext = validateMedia(contentType, size);
+  const safeName = sanitizeFileName(filename, ext);
   const amzDate = new Date().toISOString().replace(/[:-]|\.\d{3}/g, '');
   const key = `shortsfactory/${amzDate.slice(0, 8)}/${amzDate}-${randomBytes(4).toString('hex')}-${safeName}`;
 
@@ -138,7 +316,25 @@ export function buildUploadTarget({ filename, contentType, size } = {}, e = uplo
     throw new UploadError('S3_PUBLIC_BASE_URL fehlt: Dieser Endpunkt (z. B. Cloudflare R2) hat keine ableitbare öffentliche Adresse. Bitte die öffentliche Bucket-URL (r2.dev-Subdomain oder eigene Domain) als S3_PUBLIC_BASE_URL setzen.', 500);
   }
   const publicUrl = `${base}/${key}`;
-  return { uploadUrl, publicUrl, key, expiresIn: SIGN_TTL };
+  return { provider: 's3', uploadUrl, publicUrl, key, expiresIn: SIGN_TTL };
+}
+
+/** Read a raw binary request body across runtimes (Buffer, string, stream). */
+async function readRawBody(req) {
+  if (Buffer.isBuffer(req.body)) return req.body;
+  if (typeof req.body === 'string') return Buffer.from(req.body, 'utf8');
+  if (req.body instanceof Uint8Array) return Buffer.from(req.body);
+  if (req[Symbol.asyncIterator]) {
+    const chunks = [];
+    let total = 0;
+    for await (const chunk of req) {
+      total += chunk.length;
+      if (total > PART_SIZE + 1024 * 1024) throw new UploadError('Upload-Teil zu groß.');
+      chunks.push(Buffer.from(chunk));
+    }
+    return Buffer.concat(chunks);
+  }
+  return null;
 }
 
 export default async function handler(req, res) {
@@ -150,19 +346,45 @@ export default async function handler(req, res) {
     return res.status(405).json({ error: 'Method not allowed' });
   }
   const e = uploadEnv();
+  const provider = uploadHostConfigured(e) ? providerOf(e) : null;
   if (req.method === 'GET') {
-    return res.status(200).json({
-      configured: uploadHostConfigured(e),
-      kind: 's3',
-      bucket: e.bucket || null,
-      publicBase: uploadHostConfigured(e) ? derivePublicBase(e) : null,
-    });
+    let publicBase = null;
+    if (provider) {
+      publicBase = provider === 'ia'
+        ? `https://archive.org/download/${e.bucket}`
+        : (() => { try { return derivePublicBase(e); } catch { return null; } })();
+    }
+    return res.status(200).json({ configured: Boolean(provider), provider, bucket: e.bucket || null, publicBase });
   }
   try {
-    const body = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
-    if (body?.action === 'sign') {
-      const target = buildUploadTarget(body, e);
+    const isJson = String(req.headers?.['content-type'] || '').includes('json');
+    const body = isJson || !req.headers?.['content-type']
+      ? (typeof req.body === 'string' ? JSON.parse(req.body) : req.body) || {}
+      : { action: new URL(req.url, 'http://local').searchParams.get('action'), binary: await readRawBody(req) };
+    if (!body || typeof body !== 'object') throw new UploadError('Ungültige Anfrage.', 400);
+
+    if (body.action === 'sign') {
+      const target = provider === 'ia'
+        ? await iaInitUpload(body, e)
+        : buildUploadTarget(body, e);
       return res.status(200).json(target);
+    }
+    if (body.action === 'ia-direct') {
+      if (provider !== 'ia') throw new UploadError('ia-direct ist nur mit dem Internet-Archive-Endpunkt möglich.', 400);
+      return res.status(200).json(iaDirectUpload(body, e));
+    }
+    if (body.action === 'ia-part') {
+      if (provider !== 'ia') throw new UploadError('ia-part ist nur mit dem Internet-Archive-Endpunkt möglich.', 400);
+      const q = new URL(req.url, 'http://local').searchParams;
+      const result = await iaUploadPart({
+        key: q.get('key'), uploadId: q.get('uploadId'),
+        partNumber: Number(q.get('partNumber')), body: body.binary,
+      }, e);
+      return res.status(200).json(result);
+    }
+    if (body.action === 'ia-complete') {
+      if (provider !== 'ia') throw new UploadError('ia-complete ist nur mit dem Internet-Archive-Endpunkt möglich.', 400);
+      return res.status(200).json(await iaCompleteUpload(body, e));
     }
     return res.status(400).json({ error: 'Unbekannte Aktion.' });
   } catch (err) {

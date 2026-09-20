@@ -1,7 +1,7 @@
 import { test, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash, createHmac } from 'node:crypto';
-import handler, { uploadEnv, uploadHostConfigured, presignPut, buildUploadTarget, sanitizeFileName } from '../api/upload.js';
+import handler, { uploadEnv, uploadHostConfigured, presignPut, buildUploadTarget, sanitizeFileName, providerOf, validateIaItem } from '../api/upload.js';
 import { validateVideoUrl } from '../shared/buffer.js';
 
 const ENV_KEYS = ['S3_ACCESS_KEY_ID', 'S3_SECRET_ACCESS_KEY', 'S3_BUCKET', 'S3_REGION', 'S3_ENDPOINT', 'S3_PUBLIC_BASE_URL'];
@@ -27,10 +27,10 @@ function withFixedTime(iso, fn) {
   try { return fn(); } finally { globalThis.Date = RealDate; }
 }
 
-async function request(body, method = 'POST', headers = {}) {
+async function request(body, method = 'POST', headers = {}, url = '/api/upload') {
   let status = 200, payload;
-  const response = { setHeader() {}, status(code) { status = code; return this; }, json(data) { payload = data; } };
-  await handler({ method, headers, body }, response);
+  const response = { setHeader() {}, status(code) { status = code; return this; }, json(data) { payload = data; if (status >= 400 && process.env.DBG) console.error('DBG', status, JSON.stringify(data)); } };
+  await handler({ method, headers, body, url }, response);
   return { status, payload };
 }
 
@@ -136,4 +136,142 @@ test('sign endpoint validates input and returns upload + public URL', async () =
 test('cross-site requests and unknown actions are rejected', async () => {
   assert.equal((await request({ action: 'sign' }, 'POST', { 'sec-fetch-site': 'cross-site' })).status, 403);
   assert.equal((await request({ action: 'nope' })).status, 400);
+});
+
+/* ---------------- Internet Archive provider (free, no caps) ---------------- */
+
+const IA_ENV = { S3_ENDPOINT: 'https://s3.us.archive.org', S3_BUCKET: 'shortsfactory-videos' };
+const IA_KEY = '20260920-20260920T091223Z-deadbeef-My-Video.mp4';
+
+test('IA: provider detection via S3_ENDPOINT and item-name validation', () => {
+  setEnv(IA_ENV);
+  assert.equal(providerOf(uploadEnv()), 'ia');
+  setEnv({ S3_ENDPOINT: 'https://abc123.r2.cloudflarestorage.com' });
+  assert.equal(providerOf(uploadEnv()), 's3');
+  setEnv({ S3_ENDPOINT: '' });
+  assert.equal(providerOf(uploadEnv()), 's3');
+  assert.ok(validateIaItem('ab'));
+  assert.ok(validateIaItem('has--double'));
+  assert.ok(validateIaItem('mit leer'));
+  assert.ok(validateIaItem('-startsWithDash'));
+  assert.equal(validateIaItem('shortsfactory-videos'), '');
+});
+
+test('IA: GET status reports provider and derived download base without secrets', async () => {
+  setEnv(IA_ENV);
+  const status = await request(undefined, 'GET');
+  assert.equal(status.payload.provider, 'ia');
+  assert.equal(status.payload.configured, true);
+  assert.equal(status.payload.publicBase, 'https://archive.org/download/shortsfactory-videos');
+  assert.ok(!JSON.stringify(status.payload).includes('secret-key'));
+});
+
+test('IA: sign starts the multipart upload, returns flat key, URLs and part size', async () => {
+  setEnv(IA_ENV);
+  const calls = [];
+  globalThis.fetch = async (url, opts = {}) => {
+    calls.push({ url: String(url), opts });
+    return new Response('<InitiateMultipartUploadResult><UploadId>ia-upload-id-1</UploadId></InitiateMultipartUploadResult>', { status: 200 });
+  };
+  const res = await request({ action: 'sign', filename: 'My Video.mp4', contentType: 'video/mp4', size: 50 * 1024 * 1024 });
+  assert.equal(res.status, 200);
+  assert.equal(res.payload.provider, 'ia');
+  assert.equal(res.payload.uploadId, 'ia-upload-id-1');
+  assert.equal(res.payload.partSize, 4 * 1024 * 1024);
+  assert.ok(!res.payload.key.includes('/'));
+  assert.match(res.payload.key, /^\d{8}-\d{8}T\d{6}Z-[0-9a-f]{8}-My-Video\.mp4$/);
+  assert.match(res.payload.publicUrl, /^https:\/\/archive\.org\/download\/shortsfactory-videos\/\d{8}-\d{8}T\d{6}Z-[0-9a-f]{8}-My-Video\.mp4$/);
+  assert.equal(validateVideoUrl(res.payload.publicUrl), '');
+  const call = calls[0];
+  assert.ok(call.url.startsWith('https://s3.us.archive.org/shortsfactory-videos/'));
+  assert.ok(call.url.endsWith('?uploads'));
+  assert.equal(call.opts.headers.Authorization, 'LOW AKIDEXAMPLE:secret-key');
+  assert.equal(call.opts.headers['x-archive-auto-make-bucket'], '1');
+  assert.equal(call.opts.headers['x-archive-interactive-priority'], '1');
+  assert.equal(call.opts.headers['x-archive-meta-mediatype'], 'movies');
+  assert.equal(call.opts.headers['x-archive-size-hint'], String(50 * 1024 * 1024));
+  assert.ok(!JSON.stringify(res.payload).includes('secret-key'));
+});
+
+test('IA: failed init surfaces IA errors instead of pretending success', async () => {
+  setEnv(IA_ENV);
+  globalThis.fetch = async () => new Response('SlowDown', { status: 503 });
+  const res = await request({ action: 'sign', filename: 'v.mp4', contentType: 'video/mp4', size: 10 });
+  assert.equal(res.status, 503);
+  assert.match(res.payload.error, /überlastet|SlowDown/);
+  globalThis.fetch = async () => new Response('<NoUploadId/>', { status: 200 });
+  const res2 = await request({ action: 'sign', filename: 'v.mp4', contentType: 'video/mp4', size: 10 });
+  assert.equal(res2.status, 502);
+});
+
+test('IA: part upload relays the binary chunk with auth and returns the etag', async () => {
+  setEnv(IA_ENV);
+  const seen = [];
+  globalThis.fetch = async (url, opts = {}) => {
+    seen.push({ url: String(url), opts });
+    return new Response('', { status: 200, headers: { etag: '"etag-1"' } });
+  };
+  const chunk = Buffer.from('chunk-bytes-here');
+  const res = await request(chunk, 'POST', { 'content-type': 'application/octet-stream' },
+    `/api/upload?action=ia-part&key=${encodeURIComponent(IA_KEY)}&uploadId=upid-1&partNumber=1`);
+  assert.equal(res.status, 200);
+  assert.equal(res.payload.etag, '"etag-1"');
+  const call = seen[0];
+  assert.ok(call.url.startsWith(`https://s3.us.archive.org/shortsfactory-videos/${IA_KEY}?partNumber=1&uploadId=upid-1`));
+  assert.equal(call.opts.headers.Authorization, 'LOW AKIDEXAMPLE:secret-key');
+  assert.equal(Buffer.from(call.opts.body).toString(), 'chunk-bytes-here');
+  // invalid keys / parts are rejected before any network call
+  globalThis.fetch = async () => { throw new Error('must not be called'); };
+  for (const url of [
+    '/api/upload?action=ia-part&key=../evil&uploadId=upid-1&partNumber=1',
+    `/api/upload?action=ia-part&key=${encodeURIComponent(IA_KEY)}&uploadId=upid-1&partNumber=0`,
+    `/api/upload?action=ia-part&key=${encodeURIComponent(IA_KEY)}&uploadId=upid-1&partNumber=99999`,
+  ]) {
+    assert.equal((await request(Buffer.from('x'), 'POST', { 'content-type': 'application/octet-stream' }, url)).status >= 400, true, url);
+  }
+});
+
+test('IA: complete sends the manifest and prefers a live public URL', async () => {
+  setEnv(IA_ENV);
+  const seen = [];
+  globalThis.fetch = async (url, opts = {}) => {
+    seen.push({ url: String(url), method: opts.method, body: opts.body, headers: opts.headers });
+    if (opts.method === 'HEAD') return new Response(null, { status: 200 });
+    return new Response('<CompleteMultipartUploadResult/>', { status: 200 });
+  };
+  const res = await request({ action: 'ia-complete', key: IA_KEY, uploadId: 'upid-1', parts: [{ partNumber: 1, etag: '"a"' }, { partNumber: 2, etag: '"b"' }] });
+  assert.equal(res.status, 200);
+  assert.equal(res.payload.ok, true);
+  assert.equal(res.payload.publicUrl, `https://s3.us.archive.org/shortsfactory-videos/${IA_KEY}`);
+  assert.equal(validateVideoUrl(res.payload.publicUrl), '');
+  const complete = seen.find(c => c.method === 'POST');
+  assert.ok(complete.body.includes('<PartNumber>1</PartNumber>'));
+  assert.ok(complete.body.includes('&quot;a&quot;'));
+  assert.equal(complete.headers.Authorization, 'LOW AKIDEXAMPLE:secret-key');
+});
+
+test('IA: direct fallback signs a browser PUT with header auth', async () => {
+  setEnv(IA_ENV);
+  const res = await request({ action: 'ia-direct', filename: 'v.mp4', contentType: 'video/mp4', size: 10 });
+  assert.equal(res.status, 200);
+  assert.equal(res.payload.provider, 'ia-direct');
+  assert.equal(res.payload.headers.Authorization, 'LOW AKIDEXAMPLE:secret-key');
+  assert.equal(res.payload.headers['Content-Type'], 'video/mp4');
+  assert.match(res.payload.uploadUrl, /^https:\/\/s3\.us\.archive\.org\/shortsfactory-videos\//);
+  assert.equal(validateVideoUrl(res.payload.publicUrl), '');
+});
+
+test('IA actions are refused when an S3 endpoint is configured', async () => {
+  setEnv({ S3_ENDPOINT: '' });
+  for (const action of ['ia-direct', 'ia-complete']) {
+    assert.equal((await request({ action })).status, 400);
+  }
+  assert.equal((await request(Buffer.from('x'), 'POST', { 'content-type': 'application/octet-stream' }, '/api/upload?action=ia-part&key=x&uploadId=y&partNumber=1')).status, 400);
+});
+
+test('s3 sign response declares its provider', async () => {
+  setEnv({ S3_ENDPOINT: '' });
+  const res = await request({ action: 'sign', filename: 'clip.mp4', contentType: 'video/mp4', size: 1234567 });
+  assert.equal(res.status, 200);
+  assert.equal(res.payload.provider, 's3');
 });

@@ -160,10 +160,24 @@ export default function PostScheduleModal({ targetItems, existingPosts, autoStar
       </div> : <div className="mt-5 grid gap-6">
         {uploadMode ? <div className="flex items-start gap-2 border border-volt-400/40 bg-volt-400/5 p-3 font-mono text-xs leading-relaxed text-coal-200">
           <HardDriveUpload className="mt-0.5 size-4 shrink-0 text-volt-300" />
-          <span>Upload-Host <strong>{host?.bucket}</strong> verbunden — du musst <strong>keine Links mehr eintragen</strong>. Jedes fertige Video wird automatisch hochgeladen und Buffer erhält den dauerhaften öffentlichen Link. Modus: <button type="button" disabled={submitting} onClick={() => setManualLinks(true)} className="text-volt-300 underline">stattdessen eigene Links eintragen</button></span>
+          <span>{host?.provider === 'ia'
+            ? <>Internet Archive verbunden (Item <strong>{host?.bucket}</strong>) — komplett kostenlos, ohne Limits. Du musst <strong>keine Links mehr eintragen</strong>: Jedes fertige Video wird automatisch hochgeladen und Buffer erhält den dauerhaften öffentlichen Link.</>
+            : <>Upload-Host <strong>{host?.bucket}</strong> (S3) verbunden — du musst <strong>keine Links mehr eintragen</strong>. Jedes fertige Video wird automatisch hochgeladen und Buffer erhält den dauerhaften öffentlichen Link.</>} Modus: <button type="button" disabled={submitting} onClick={() => setManualLinks(true)} className="text-volt-300 underline">stattdessen eigene Links eintragen</button></span>
         </div> : <div className="grid gap-3 border border-amber-warn/40 bg-amber-warn/5 p-3 font-mono text-xs leading-relaxed text-coal-200">
-          <span>Kein Upload-Host eingerichtet. Aktuell trägst du pro Video eine öffentliche HTTPS-Adresse ein.</span>
-          <details><summary className="cursor-pointer text-volt-300">Einmal einrichten — danach nie wieder Links eintippen (S3-kompatibler Bucket: Cloudflare R2 / Backblaze B2 / AWS S3)</summary>
+          <span>Kein Upload-Host eingerichtet. Aktuell trägst du pro Video eine öffentliche HTTPS-Adresse ein. Einmal einrichten — danach nie wieder Links eintippen:</span>
+          <details><summary className="cursor-pointer text-volt-300">Option A (empfohlen): Internet Archive — komplett kostenlos, ohne Limits, ohne Kreditkarte</summary>
+            <div className="mt-2 grid gap-2">
+              <p>1. Kostenloses Konto auf <a href="https://archive.org" target="_blank" rel="noreferrer" className="text-volt-300 underline">archive.org</a> anlegen (nur E-Mail, keine Zahlungsmethode).</p>
+              <p>2. S3-Schlüssel abrufen: <a href="https://archive.org/account/s3.php" target="_blank" rel="noreferrer" className="text-volt-300 underline">archive.org/account/s3.php</a> → <strong>access key</strong> + <strong>secret key</strong> notieren.</p>
+              <p>3. Zugangsdaten ausschließlich als Server-Umgebungsvariablen setzen (lokal <code>.env.local</code>, auf Vercel Projekteinstellungen), dann neu starten/deployen:</p>
+              <pre className="overflow-x-auto border border-coal-700 bg-coal-950 p-2 text-[10px] text-coal-300">{`S3_ACCESS_KEY_ID=<dein-access-key>
+S3_SECRET_ACCESS_KEY=<dein-secret-key>
+S3_BUCKET=shortsfactory-videos   # Item-Name, wird beim ersten Upload automatisch angelegt
+S3_ENDPOINT=https://s3.us.archive.org`}</pre>
+              <p>4. Diese Seite neu laden — fertig. Kein CORS, kein Bucket-Setup, keine Limits. Details im README unter „Upload-Host“.</p>
+            </div>
+          </details>
+          <details><summary className="cursor-pointer text-volt-300">Option B: S3-kompatibler Bucket (Cloudflare R2 / Backblaze B2 / AWS S3) — schneller, eigene Domain, aber Kontingente</summary>
             <div className="mt-2 grid gap-2">
               <p>1. Bucket erstellen und <strong>öffentlichen Lesezugriff</strong> aktivieren (R2: r2.dev-Subdomain oder eigene Domain · B2: Files in bucket are Public · S3: Bucket-Policy für s3:GetObject).</p>
               <p>2. Diese CORS-Regel im Bucket erlauben (PUT/GET/HEAD von dieser App):</p>

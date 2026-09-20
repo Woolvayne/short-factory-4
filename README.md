@@ -95,16 +95,86 @@ keine erfundenen Post-IDs und keine falschen Erfolgsmeldungen.
 ### Upload-Host — einmal einrichten, nie wieder Links eintippen
 
 Buffer akzeptiert **keine direkten Datei-Uploads per API**, sondern benötigt
-öffentlich abrufbare Medien-URLs. Der Mittelweg dafür ist ein **Upload-Host**:
-ein S3-kompatibler Bucket (Cloudflare R2, Backblaze B2, AWS S3 oder MinIO),
+öffentlich abrufbare Medien-URLs. Der Mittelweg dafür ist ein **Upload-Host**,
 der **genau einmal** mit dieser App verbunden wird. Danach lädt die App jedes
 fertig gerenderte Video selbst hoch und übergibt Buffer den dauerhaften
-öffentlichen Link — **kein manuelles Eintippen von Links mehr**. Die Videos
-fließen dabei direkt aus dem Browser in den Bucket; dieser Server signiert nur
-die Upload-URL und berührt die Videodaten nie (Serverless-Body-Limits bleiben
-nicht relevant).
+öffentlichen Link — **kein manuelles Eintippen von Links mehr**. Zwei Arten von
+Hosts werden unterstützt:
 
-Einmalige Einrichtung:
+| | **Option A: Internet Archive** | **Option B: S3-Bucket (R2 / B2 / AWS)** |
+| --- | --- | --- |
+| Kosten | **komplett kostenlos** | Free Tier mit Kontingenten (R2: 10 GB) |
+| Limits | **keine** (kein Speicher-/Traffic-Limit, keine Karte nötig) | Kontingente; R2 verlangt einmalig eine Zahlungsmethode |
+| Permanenz | dauerhaft, öffentlich | dauerhaft, öffentlich |
+| Setup | nur 4 Env-Variablen, **kein CORS/kein Bucket-Setup** | Bucket + Public-Access + CORS-Regel |
+| Tempo | Upload in 4-MB-Häppchen über das Relay; Datei kurz nach dem Upload abrufbar | direkter Browser-Upload, sofort abrufbar |
+
+Bei beiden gilt: Die Videos werden von der App hochgeladen, Buffer bekommt die
+permalink-fähige öffentliche Adresse automatisch — und der Versand-Lauf ist ab
+jetzt: einen Knopf drücken → alle Videos werden nacheinander hochgeladen →
+jeder Post geht mit kurzer Pause an Buffer.
+
+#### Option A: Internet Archive — komplett kostenlos, ohne Limits
+
+Das [Internet Archive](https://archive.org) hostet Medien dauerhaft und
+öffentlich, ohne Speicher- oder Bandbreitenlimits und ohne Zahlungsmethode.
+Die App nutzt die offizielle
+[S3-artige API](https://archive.org/developers/ias3.html) des Archivs
+(`Authorization: LOW …`, Multipart-Upload, automatische Item-Anlage). Ein
+CORS- oder Bucket-Setup ist **nicht nötig**: Die Videodatei wird in
+4-MB-Häppchen über das hiesige Relay (`/api/upload`, same-origin) direkt ins
+Archiv gestreamt — der geheime Schlüssel verlässt den Server auf diesem Weg
+nicht. Sollte dieser Weg einmal scheitern, versucht die App automatisch einen
+einzigen direkten Browser-Upload als Fallback.
+
+Einmalige Einrichtung (≈ 5 Minuten):
+
+1. Kostenloses Konto auf [archive.org](https://archive.org) anlegen (nur
+   E-Mail — **keine Kreditkarte, kein Abo**).
+2. S3-Schlüssel abrufen: [archive.org/account/s3.php](https://archive.org/account/s3.php)
+   → **access key** und **secret key** notieren.
+3. Zugangsdaten **ausschließlich als Server-Umgebungsvariablen** setzen
+   (lokal `.env.local`, auf Vercel Projekteinstellungen), dann neu
+   starten/deployen. Kein `VITE_`-Präfix!
+
+   ```bash
+   S3_ACCESS_KEY_ID=<dein-access-key>
+   S3_SECRET_ACCESS_KEY=<dein-secret-key>
+   S3_BUCKET=shortsfactory-videos     # Item-Name: 3–80 Zeichen, keine "--"
+   S3_ENDPOINT=https://s3.us.archive.org
+   ```
+
+4. App neu laden — das Versandfenster zeigt **„Internet Archive verbunden“**.
+
+Eigenschaften, die man kennen sollte:
+
+* **Der Item-Name (S3_BUCKET) wird beim ersten Upload automatisch angelegt**
+  und ist dann öffentlich unter `archive.org/details/<item>` sichtbar; jede
+  Videodatei erhält eine dauerhafte Adresse
+  `https://archive.org/download/<item>/<datei>` (bzw. die äquivalente
+  `s3.us.archive.org`-Adresse, je nachdem, welche beim Abschluss des Uploads
+  schon erreichbar ist). Die App prüft das nach dem Upload selbst und wählt
+  die Live-Adresse.
+* **Alles ist öffentlich und dauerhaft** — genau wie die TikTok/IG/YT-Posts
+  selbst. Dateien zu Posts, die schon veröffentlicht wurden, kann man drin
+  lassen; alte Entwürfe im Archiv-Webinterface löschen (Item-Seite →
+  Bearbeiten → Delete). Es gibt kein automatisches Aufräumen — und auch kein
+  Limit, das eines erzwingen würde.
+* **Kurz nach dem Upload ist die Datei verfügbar** (die Ingestion des Archivs
+  dauert typischerweise Sekunden bis wenige Minuten). Für den
+  **Buffer-Queue**-Modus ist das irrelevant; bei **„Jetzt posten“** die erste
+  Datei einmal im privaten Browserfenster gegenprüfen.
+* **Wenn das Archiv überlastet ist** (503 SlowDown), stoppt der Lauf mit einer
+  klaren Meldung, ohne etwas an Buffer zu senden — wenige Minuten später
+  erneut drücken.
+* **Sicherheit:** Auf dem Relay-Weg bleibt der Schlüssel serverseitig. Nur im
+  Fallback-Fall wird er an den eigenen Browser übergeben — Deployment daher
+  zwingend hinter Zugriffsschutz (siehe oben), genau wie bei `BUFFER_API_KEY`.
+
+#### Option B: S3-kompatibler Bucket (Cloudflare R2 / Backblaze B2 / AWS S3)
+
+Wer eigene Domain, maximale Geschwindigkeit oder volle Kontrolle will,
+verbindet stattdessen einen S3-kompatiblen Bucket. Einmalige Einrichtung:
 
 1. Bucket anlegen und **öffentlichen Lesezugriff** aktivieren:
    * **Cloudflare R2** → Settings → Public access: *r2.dev-Subdomain* erlauben
@@ -146,11 +216,12 @@ Einmalige Einrichtung:
    Ablauf ist ab jetzt: einen Knopf drücken → alle Videos werden nacheinander
    hochgeladen → jeder Post geht mit kurzer Pause an Buffer.
 
-#### Konkret: Cloudflare R2 (empfohlen) — einmal durchklicken, fertig
+#### Konkret: Cloudflare R2 (Option B im Detail) — einmal durchklicken, fertig
 
-Warum R2: **10 GB Speicher + 1 Mio. Schreib-/10 Mio. Lese-Operationen pro Monat
-kostenlos**, kein Traffic-Entgelt (Egress frei), von Buffers eigener Hilfe als
-Hosting für API-Posts empfohlen, EU-Standort wählbar. Es fällt **kein Abo
+Warum R2, wenn es auch das Archiv tut: **eigene Domain anbindbar, sehr schnelle
+Auslieferung, EU-Standort wählbar**, 10 GB Speicher + 1 Mio. Schreib-/10 Mio.
+Lese-Operationen pro Monat kostenlos, kein Traffic-Entgelt (Egress frei), von
+Buffers eigener Hilfe als Hosting für API-Posts empfohlen. Es fällt **kein Abo
 an** — Cloudflare verlangt nur eine Zahlungsmethode (Karte/PayPal) zur
 Freischaltung von R2. Bei ~10 Shorts à 10–30 MB pro Woche bleibt man weit
 innerhalb des kostenlosen Kontingents.
@@ -223,19 +294,25 @@ Egress — daher R2 vorziehen.
 | Symptom | Ursache / Fix |
 | --- | --- |
 | Versandfenster zeigt weiter „Kein Upload-Host eingerichtet“ | Env-Vars fehlen im Prozess — nach `.env.local`-Änderung dev-Server neu starten; auf Vercel neu deployen |
-| „Upload fehlgeschlagen — prüfe die CORS-Freigabe“ | CORS-Regel fehlt/falsch (Schritt 4) — exakt das JSON oben eintragen |
-| „S3_PUBLIC_BASE_URL fehlt“ | r2.dev-Public-URL nicht als `S3_PUBLIC_BASE_URL` gesetzt (Schritt 3/6) |
+| Internet Archive: „… überlastet (503 SlowDown)“ | Archiv-Warteschlange voll — wenige Minuten warten, erneut senden; es wurde nichts an Buffer übergeben |
+| Internet Archive: Link direkt nach Upload nicht abrufbar | Ingestion läuft noch (Sekunden bis Minuten) — die App wählt automatisch die gerade erreichbare Adresse; im Zweifel privat gegenprüfen |
+| Internet Archive: „… Item-Name …“ | `S3_BUCKET` muss 3–80 Zeichen haben (Buchstaben/Zahlen/`._-`), kein `--` |
+| Internet Archive: Relay **und** Direkt-Upload schlugen fehl | Schlüssel prüfen (frisch aus s3.php kopiert?), dann erneut versuchen — sendeseitig ist nichts passiert |
+| „Upload fehlgeschlagen — prüfe die CORS-Freigabe“ (Option B) | CORS-Regel fehlt/falsch — exakt das JSON oben eintragen |
+| „S3_PUBLIC_BASE_URL fehlt“ (Option B) | r2.dev-Public-URL nicht als `S3_PUBLIC_BASE_URL` gesetzt |
 | Upload ok, aber Buffer meldet Medienfehler | Public-URL in privatem Fenster testen — sie muss das Video direkt ausliefern; prüfen, ob r2.dev noch aktiviert ist |
 | r2.dev wirkt langsam / gedrosselt | Eigene Domain anbinden (oben) |
 
-Hinweise: Pro Upload erzeugt die App einen eindeutigen Schlüssel unter
-`shortsfactory/<datum>/…` — es wird nie etwas überschrieben. Die erzeugten
-Links sind dauerhaft (keine ablaufenden Signaturen), damit Buffer sie bis zur
+Hinweise: Pro Upload erzeugt die App einen eindeutigen Schlüssel (Option B:
+`shortsfactory/<datum>/…`, Option A: flacher `<datum>-<zeit>-<zufall>-<datei>`
+Name im Item) — es wird nie etwas überschrieben. Die erzeugten Links sind
+dauerhaft (keine ablaufenden Signaturen), damit Buffer sie bis zur
 Veröffentlichung abrufen kann. Aufräumen: alte Dateien im Bucket entweder
-manuell löschen oder per Lifecycle-Regel (z. B. nach 30 Tagen). R2/MinIO ohne
-ableitbare öffentliche Adresse verlangen zwingend `S3_PUBLIC_BASE_URL`; die
-Route lehnt den Versand in dem Fall mit einer klaren Fehlermeldung ab, statt
-Links zu erzeugen, die Buffer nie abrufen könnte.
+manuell löschen oder per Lifecycle-Regel (z. B. nach 30 Tagen); im Internet
+Archive über die Item-Seite löschen. R2/MinIO ohne ableitbare öffentliche
+Adresse verlangen zwingend `S3_PUBLIC_BASE_URL`; die Route lehnt den Versand
+in dem Fall mit einer klaren Fehlermeldung ab, statt Links zu erzeugen, die
+Buffer nie abrufen könnte.
 
 ### Der Ein-Klick-Versand (alle 10 auf einmal)
 
@@ -346,7 +423,7 @@ deinem Hosting; ein später geänderter YouTube-Posttitel verändert das Video n
 Die Vorschau respektiert reduzierte Bewegung; im exportierten Video bleibt die
 gewählte Animation enthalten. Kein Referenz-Anhang lag bei der Umsetzung vor.
 
-### Verwendete Buffer-Dokumentation
+### Verwendete Dokumentation
 
 - [Hosting Media](https://developers.buffer.com/guides/hosting-media.html)
 - [Create Video Post](https://developers.buffer.com/examples/create-video-post.html)
@@ -355,6 +432,7 @@ gewählte Animation enthalten. Kein Referenz-Anhang lag bei der Umsetzung vor.
 - [ShareMode](https://developers.buffer.com/types/ShareMode.html)
 - [YouTube-Metadaten](https://developers.buffer.com/types/YoutubePostMetadataInput.html)
 - [Instagram-Metadaten](https://developers.buffer.com/types/InstagramPostMetadataInput.html)
+- [Internet Archive: S3-artige API](https://archive.org/developers/ias3.html) (Upload-Host Option A)
 
 ## Lokaler Asset-Speicher
 

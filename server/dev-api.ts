@@ -3,25 +3,34 @@ import type { Plugin } from 'vite';
 import { pathToFileURL } from 'node:url';
 import path from 'node:path';
 
+const API_MODULES: Record<string, string> = {
+  '/api/buffer': 'api/buffer.js',
+  '/api/upload': 'api/upload.js',
+  '/api/tts': 'api/tts.js',
+};
+
 export function localApi(): Plugin {
   return {
     name: 'local-api',
     configureServer(server) {
       server.middlewares.use(async (req: IncomingMessage, res: ServerResponse, next) => {
         const endpoint = req.url?.split('?')[0];
-        const apiModule =
-          endpoint === '/api/buffer' ? 'api/buffer.js'
-          : endpoint === '/api/upload' ? 'api/upload.js'
-          : endpoint === '/api/tts' ? 'api/tts.js'
-          : null;
+        const apiModule = endpoint ? API_MODULES[endpoint] : undefined;
         if (!apiModule) return next();
         try {
+          const isBinary = String(req.headers['content-type'] || '').includes('octet-stream');
+          const maxBytes = isBinary ? 6 * 1024 * 1024 : 1024 * 1024; // upload chunks arrive raw
           let raw = '';
+          const chunks: Buffer[] = [];
+          let total = 0;
           for await (const chunk of req) {
-            raw += chunk;
-            if (Buffer.byteLength(raw) > 1024 * 1024) { res.statusCode = 413; res.end('Request too large'); return; }
+            total += chunk.length;
+            if (total > maxBytes) { res.statusCode = 413; res.end('Request too large'); return; }
+            if (isBinary) chunks.push(Buffer.from(chunk));
+            else raw += chunk;
           }
-          const request = Object.assign(req, { body: raw ? JSON.parse(raw) : undefined });
+          const parsedBody = isBinary ? Buffer.concat(chunks) : raw ? JSON.parse(raw) : undefined;
+          const request = Object.assign(req, { body: parsedBody });
           const response = Object.assign(res, {
             status(code: number) { res.statusCode = code; return response; },
             json(data: unknown) { res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify(data)); return response; },

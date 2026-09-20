@@ -1,14 +1,23 @@
 /**
- * One-time-configured upload host: the browser signs a presigned PUT via
- * /api/upload, then streams the rendered video straight into the user's own
- * S3-compatible bucket (Cloudflare R2 / Backblaze B2 / AWS S3 / MinIO).
- * The video never passes through this app's server. The returned permanent
- * public URL is what Buffer receives — no manual link entry ever again.
+ * One-time-configured upload host: the browser hands finished renders to the
+ * configured host and receives the permanent public URL that Buffer gets —
+ * no manual link entry ever again.
+ *
+ * Two providers (chosen once via server env, see api/upload.js):
+ * - "s3"  (Cloudflare R2 / Backblaze B2 / AWS S3 / MinIO): presigned PUT,
+ *   the video streams browser → bucket directly.
+ * - "ia"  (Internet Archive — free, no caps, no payment method): chunked
+ *   same-origin relay (4 MB parts → /api/upload → IA multipart). No CORS
+ *   setup needed; the IA key never reaches the browser on this path. If the
+ *   relay fails (e.g. IA rejects small parts), a browser-direct PUT with
+ *   header auth is attempted once as fallback.
  */
+
+export type UploadProvider = 's3' | 'ia';
 
 export interface UploadHostStatus {
   configured: boolean;
-  kind?: string;
+  provider?: UploadProvider | null;
   bucket?: string | null;
   publicBase?: string | null;
 }
@@ -24,46 +33,109 @@ export async function fetchUploadStatus(signal?: AbortSignal): Promise<UploadHos
   const data = await res.json();
   return {
     configured: Boolean(data?.configured),
-    kind: data?.kind,
+    provider: data?.provider === 'ia' ? 'ia' : 's3',
     bucket: data?.bucket ?? null,
     publicBase: data?.publicBase ?? null,
   };
 }
 
 interface SignResponse {
-  uploadUrl: string;
+  provider: 's3' | 'ia';
+  uploadUrl?: string;
   publicUrl: string;
+  publicUrlS3?: string;
   key: string;
-  expiresIn: number;
+  uploadId?: string;
+  partSize?: number;
+  note?: string;
+  headers?: Record<string, string>;
 }
 
-export async function signUpload(
-  filename: string,
-  contentType: string,
-  size: number,
-  signal?: AbortSignal
-): Promise<SignResponse> {
+async function postAction(payload: Record<string, unknown>, signal?: AbortSignal): Promise<SignResponse & { ok?: boolean; etag?: string }> {
   let res: Response;
   try {
     res = await fetch('/api/upload', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action: 'sign', filename, contentType, size }),
+      body: JSON.stringify(payload),
       signal,
     });
   } catch {
-    throw new Error('Upload-Host nicht erreichbar. Es wurde nichts hochgeladen.');
+    throw new Error('Upload-Host (Relay) nicht erreichbar.');
   }
   const data = await res.json().catch(() => null);
-  if (!res.ok || !data?.uploadUrl || !data?.publicUrl) {
-    throw new Error(data?.error || `Upload-Signatur fehlgeschlagen (HTTP ${res.status}).`);
+  if (!res.ok || !data || data.error) {
+    throw new Error(data?.error || `Upload-Anfrage fehlgeschlagen (HTTP ${res.status}).`);
   }
-  return data as SignResponse;
+  return data;
+}
+
+function xhrPut(url: string, headers: Record<string, string>, body: Blob, signal: AbortSignal | undefined, onProgress?: (p: UploadProgress) => void): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('PUT', url);
+    for (const [name, value] of Object.entries(headers)) xhr.setRequestHeader(name, value);
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable) onProgress?.({ loaded: e.loaded, total: e.total });
+    };
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) resolve();
+      else reject(new Error(`Upload-Host hat HTTP ${xhr.status} gemeldet.`));
+    };
+    xhr.onerror = () =>
+      reject(new Error('Upload fehlgeschlagen — der Host blockiert Browser-Uploads (CORS) oder ist nicht erreichbar.'));
+    xhr.onabort = () => reject(new DOMException('Upload abgebrochen.', 'AbortError'));
+    const onAbort = () => xhr.abort();
+    signal?.addEventListener('abort', onAbort, { once: true });
+    xhr.onloadend = () => signal?.removeEventListener('abort', onAbort);
+    xhr.send(body);
+  });
+}
+
+/** IA via same-origin relay: init → 4 MB parts → complete. Key stays server-side. */
+async function iaRelayUpload(
+  signed: SignResponse,
+  file: Blob,
+  opts: { signal?: AbortSignal; onProgress?: (p: UploadProgress) => void }
+): Promise<string> {
+  const { key, uploadId } = signed;
+  const partSize = signed.partSize ?? 4 * 1024 * 1024;
+  if (!key || !uploadId) throw new Error('Upload-Host hat keine Upload-ID gemeldet.');
+  const parts: { partNumber: number; etag: string }[] = [];
+  const total = file.size;
+  let loaded = 0;
+  for (let partNumber = 1, offset = 0; offset < total; partNumber++, offset += partSize) {
+    const slice = file.slice(offset, Math.min(offset + partSize, total));
+    let etag = '';
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      try {
+        const q = `action=ia-part&key=${encodeURIComponent(key)}&uploadId=${encodeURIComponent(uploadId)}&partNumber=${partNumber}`;
+        const res = await fetch(`/api/upload?${q}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/octet-stream' },
+          body: slice,
+          signal: opts.signal,
+        });
+        const data = await res.json().catch(() => null);
+        if (!res.ok || !data?.etag) throw new Error(data?.error || `Upload-Teil ${partNumber} fehlgeschlagen (HTTP ${res.status}).`);
+        etag = data.etag;
+        break;
+      } catch (e) {
+        if (opts.signal?.aborted || (e instanceof DOMException && e.name === 'AbortError')) throw e;
+        if (attempt === 2) throw e;
+      }
+    }
+    parts.push({ partNumber, etag });
+    loaded += slice.size;
+    opts.onProgress?.({ loaded, total });
+  }
+  const done = await postAction({ action: 'ia-complete', key, uploadId, parts }, opts.signal);
+  return done.publicUrl || signed.publicUrl;
 }
 
 /**
- * Sign + PUT one rendered video to the bucket. Resolves with the permanent
- * public URL; the PUT result must be a 2xx before anything is sent to Buffer.
+ * Sign + upload one rendered video. Resolves with the permanent public URL;
+ * the upload must fully succeed before anything is sent to Buffer.
  */
 export async function uploadRenderFile(
   file: Blob,
@@ -74,28 +146,38 @@ export async function uploadRenderFile(
     onProgress?: (progress: UploadProgress) => void;
   }
 ): Promise<string> {
-  const { uploadUrl, publicUrl } = await signUpload(opts.filename, opts.contentType, file.size, opts.signal);
+  const signed = await postAction({ action: 'sign', filename: opts.filename, contentType: opts.contentType, size: file.size }, opts.signal);
 
-  await new Promise<void>((resolve, reject) => {
-    const xhr = new XMLHttpRequest();
-    xhr.open('PUT', uploadUrl);
+  if (signed.provider === 'ia') {
+    try {
+      return await iaRelayUpload(signed, file, opts);
+    } catch (e) {
+      if (opts.signal?.aborted || (e instanceof DOMException && e.name === 'AbortError')) throw e;
+      // Fallback: single browser-direct PUT with header auth (needs IA CORS).
+      let direct: SignResponse;
+      try {
+        direct = await postAction({ action: 'ia-direct', filename: opts.filename, contentType: opts.contentType, size: file.size }, opts.signal);
+      } catch {
+        throw e; // relay error is the more specific one
+      }
+      try {
+        await xhrPut(direct.uploadUrl!, direct.headers ?? {}, file, opts.signal, opts.onProgress);
+        return direct.publicUrl || signed.publicUrl;
+      } catch (e2) {
+        throw new Error(`Upload in das Internet Archive fehlgeschlagen (Relay: ${e instanceof Error ? e.message : e} · Direkt: ${e2 instanceof Error ? e2.message : e2}). Es wurde noch nichts an Buffer gesendet.`);
+      }
+    }
+  }
+
+  if (!signed.uploadUrl) throw new Error('Upload-Host hat keine signierte Adresse geliefert.');
+  try {
     // content-type is part of the presigned signature — send exactly what was signed.
-    xhr.setRequestHeader('Content-Type', opts.contentType.toLowerCase());
-    xhr.upload.onprogress = (e) => {
-      if (e.lengthComputable) opts.onProgress?.({ loaded: e.loaded, total: e.total });
-    };
-    xhr.onload = () => {
-      if (xhr.status >= 200 && xhr.status < 300) resolve();
-      else reject(new Error(`Upload-Host hat HTTP ${xhr.status} gemeldet. Es wurde nichts an Buffer gesendet.`));
-    };
-    xhr.onerror = () =>
-      reject(new Error('Upload fehlgeschlagen — prüfe die CORS-Freigabe (PUT) des Buckets und die Erreichbarkeit des Hosts.'));
-    xhr.onabort = () => reject(new DOMException('Upload abgebrochen.', 'AbortError'));
-    const onAbort = () => xhr.abort();
-    opts.signal?.addEventListener('abort', onAbort, { once: true });
-    xhr.onloadend = () => opts.signal?.removeEventListener('abort', onAbort);
-    xhr.send(file);
-  });
-
-  return publicUrl;
+    await xhrPut(signed.uploadUrl, { 'Content-Type': opts.contentType.toLowerCase() }, file, opts.signal, opts.onProgress);
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    throw new Error(
+      `${message.includes('CORS') ? 'Upload fehlgeschlagen — prüfe die CORS-Freigabe (PUT) des Buckets.' : message} Es wurde noch nichts an Buffer gesendet.`
+    );
+  }
+  return signed.publicUrl;
 }
