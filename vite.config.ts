@@ -13,7 +13,7 @@ const __dirname = path.dirname(__filename);
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), "");
   // Server-side secrets from .env.local reach the API middleware (never the client bundle).
-  for (const key of ["BUFFER_API_KEY", "S3_ACCESS_KEY_ID", "S3_SECRET_ACCESS_KEY", "S3_BUCKET", "S3_REGION", "S3_ENDPOINT", "S3_PUBLIC_BASE_URL"]) {
+  for (const key of ["BUFFER_API_KEY", "BLOB_READ_WRITE_TOKEN"]) {
     if (env[key]) process.env[key] = env[key];
   }
   return {

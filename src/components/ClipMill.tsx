@@ -251,7 +251,7 @@ export default function ClipMill({
 
                 <p className="mt-auto flex items-start gap-1.5 font-mono text-[9px] leading-relaxed tracking-wider text-coal-500">
                   <Info className="mt-0.5 size-3 shrink-0" />
-                  DIRECT LINKS MUST ALLOW CROSS-ORIGIN ACCESS (YOUR OWN HOSTING, S3/R2, PEXELS,
+                  DIRECT LINKS MUST ALLOW CROSS-ORIGIN ACCESS (YOUR OWN HOSTING, PEXELS,
                   COVERR, MIXKIT). ONLY USE FOOTAGE YOU HAVE THE RIGHTS TO.
                 </p>
               </div>
