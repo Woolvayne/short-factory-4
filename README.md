@@ -123,28 +123,49 @@ Die App nutzt die offizielle
 (`Authorization: LOW …`, Multipart-Upload, automatische Item-Anlage). Ein
 CORS- oder Bucket-Setup ist **nicht nötig**: Die Videodatei wird in
 4-MB-Häppchen über das hiesige Relay (`/api/upload`, same-origin) direkt ins
-Archiv gestreamt — der geheime Schlüssel verlässt den Server auf diesem Weg
-nicht. Sollte dieser Weg einmal scheitern, versucht die App automatisch einen
-einzigen direkten Browser-Upload als Fallback.
+Archiv gestreamt. Bei der Env-Variante verlässt der geheime Schlüssel den
+Server nie; bei der In-App-Variante reist er nur zwischen deinem Browser und
+dem eigenen Relay. Sollte der Relay-Weg einmal scheitern, versucht die App
+automatisch einen einzigen direkten Browser-Upload als Fallback.
 
-Einmalige Einrichtung (≈ 5 Minuten):
+Einmalige Einrichtung (≈ 2 Minuten, **null Konfiguration**):
 
 1. Kostenloses Konto auf [archive.org](https://archive.org) anlegen (nur
    E-Mail — **keine Kreditkarte, kein Abo**).
 2. S3-Schlüssel abrufen: [archive.org/account/s3.php](https://archive.org/account/s3.php)
    → **access key** und **secret key** notieren.
-3. Zugangsdaten **ausschließlich als Server-Umgebungsvariablen** setzen
-   (lokal `.env.local`, auf Vercel Projekteinstellungen), dann neu
-   starten/deployen. Kein `VITE_`-Präfix!
+3. In der App das Versandfenster öffnen (**Alle N Videos auf einmal posten**)
+   → im gelben Panel unter **„Option A: Internet Archive direkt verbinden“**
+   access key + secret key einfügen (Item-Name kann bleiben) →
+   **Mit Internet Archive verbinden**. Die App prüft die Schlüssel direkt beim
+   Archiv und speichert sie **nur in diesem Browser** (localStorage, genau wie
+   die AI-Keys).
 
-   ```bash
-   S3_ACCESS_KEY_ID=<dein-access-key>
-   S3_SECRET_ACCESS_KEY=<dein-secret-key>
-   S3_BUCKET=shortsfactory-videos     # Item-Name: 3–80 Zeichen, keine "--"
-   S3_ENDPOINT=https://s3.us.archive.org
-   ```
+Das war alles — kein `.env.local`, keine Vercel-Einstellungen, kein
+Neu-Deployen, keine URL, die man irgendo einträgt. Ab jetzt gilt immer:
+**Alle N Videos auf einmal posten → ein Klick → hochladen → Buffer.**
 
-4. App neu laden — das Versandfenster zeigt **„Internet Archive verbunden“**.
+Alternativ serverseitig (z. B. wenn mehrere Browser denselben Host nutzen
+sollen) — Zugangsdaten ausschließlich als Server-Umgebungsvariablen
+(lokal `.env.local`, auf Vercel Projekteinstellungen), dann neu
+starten/deployen. Kein `VITE_`-Präfix!
+
+```bash
+S3_ACCESS_KEY_ID=<dein-access-key>
+S3_SECRET_ACCESS_KEY=<dein-secret-key>
+S3_BUCKET=shortsfactory-videos     # Item-Name: 3–80 Zeichen, keine "--"
+S3_ENDPOINT=https://s3.us.archive.org
+```
+
+Ist beides gesetzt, gewinnt die serverseitige Konfiguration.
+
+**Zur Sicherheit der In-App-Variante:** Die Schlüssel liegen im localStorage
+dieses Browsers und werden bei jedem Upload-Teil über die eigene
+Same-Origin-HTTPS-Route an das eigene Relay mitgeschickt (niemals direkt ans
+Archiv, niemals in Antworten zurückgegeben). Das ist dasselbe Modell wie die
+AI-Keys dieser App — gesetzt den Fall, dass das Deployment hinter
+Zugriffsschutz steht (siehe oben), ein legitimer Operator-Kompromiss. Wer die
+Schlüssel partout nie durch den Browser sehen will, nutzt die Env-Variante.
 
 Eigenschaften, die man kennen sollte:
 
@@ -167,9 +188,12 @@ Eigenschaften, die man kennen sollte:
 * **Wenn das Archiv überlastet ist** (503 SlowDown), stoppt der Lauf mit einer
   klaren Meldung, ohne etwas an Buffer zu senden — wenige Minuten später
   erneut drücken.
-* **Sicherheit:** Auf dem Relay-Weg bleibt der Schlüssel serverseitig. Nur im
-  Fallback-Fall wird er an den eigenen Browser übergeben — Deployment daher
-  zwingend hinter Zugriffsschutz (siehe oben), genau wie bei `BUFFER_API_KEY`.
+* **Sicherheit:** Env-Variante: der Schlüssel bleibt komplett serverseitig.
+  In-App-Variante: die Schlüssel liegen im localStorage dieses Browsers und
+  gehen nur an das eigene Same-Origin-Relay (nie direkt ans Archiv, nie in
+  Antworten zurück). Fallback beider Varianten ist ein einzelner direkter
+  Browser-Upload — Deployment daher zwingend hinter Zugriffsschutz (siehe
+  oben), genau wie bei `BUFFER_API_KEY`.
 
 #### Option B: S3-kompatibler Bucket (Cloudflare R2 / Backblaze B2 / AWS S3)
 

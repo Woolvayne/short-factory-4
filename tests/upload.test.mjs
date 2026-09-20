@@ -275,3 +275,86 @@ test('s3 sign response declares its provider', async () => {
   assert.equal(res.status, 200);
   assert.equal(res.payload.provider, 's3');
 });
+
+/* ------------- in-app credentials (localStorage flow, no env needed) ------------- */
+
+const CLIENT_CREDS = { iaAccessKey: 'client-access', iaSecretKey: 'client-secret', iaItem: 'my-shorts-item' };
+
+test('ia-check validates in-app credentials without creating anything', async () => {
+  setEnv({ S3_ACCESS_KEY_ID: '', S3_SECRET_ACCESS_KEY: '', S3_BUCKET: '' });
+  let called;
+  globalThis.fetch = async (url, opts = {}) => {
+    called = { url: String(url), auth: opts.headers?.Authorization };
+    return new Response('<ListMultipartUploadsResult/>', { status: 200 });
+  };
+  const ok = await request({ action: 'ia-check', ...CLIENT_CREDS });
+  assert.equal(ok.status, 200);
+  assert.equal(ok.payload.ok, true);
+  assert.equal(ok.payload.item, 'my-shorts-item');
+  assert.equal(called.auth, 'LOW client-access:client-secret');
+  assert.ok(called.url.startsWith('https://s3.us.archive.org/my-shorts-item/'));
+
+  globalThis.fetch = async () => new Response('Forbidden', { status: 403 });
+  const bad = await request({ action: 'ia-check', ...CLIENT_CREDS });
+  assert.equal(bad.status, 200);
+  assert.equal(bad.payload.ok, false);
+  assert.match(bad.payload.error, /verweigert/);
+
+  globalThis.fetch = async () => new Response('NotFound', { status: 404 });
+  const missing = await request({ action: 'ia-check', ...CLIENT_CREDS });
+  assert.equal(missing.payload.ok, true); // keys fine, item will be auto-created
+
+  globalThis.fetch = async () => { throw new Error('down'); };
+  const down = await request({ action: 'ia-check', ...CLIENT_CREDS });
+  assert.equal(down.status, 502);
+});
+
+test('ia-check rejects invalid item names and missing keys', async () => {
+  setEnv({ S3_ACCESS_KEY_ID: '', S3_SECRET_ACCESS_KEY: '', S3_BUCKET: '' });
+  globalThis.fetch = async () => { throw new Error('must not be called'); };
+  assert.equal((await request({ action: 'ia-check', iaAccessKey: '', iaSecretKey: 'x', iaItem: 'ok-item' })).status, 400);
+  assert.equal((await request({ action: 'ia-check', ...CLIENT_CREDS, iaItem: 'bad--name' })).status, 400);
+});
+
+test('sign works with in-app credentials when no env host is configured', async () => {
+  setEnv({ S3_ACCESS_KEY_ID: '', S3_SECRET_ACCESS_KEY: '', S3_BUCKET: '' });
+  globalThis.fetch = async () => new Response('<InitiateMultipartUploadResult><UploadId>uid-9</UploadId></InitiateMultipartUploadResult>', { status: 200 });
+  const res = await request({ action: 'sign', filename: 'v.mp4', contentType: 'video/mp4', size: 1000, ...CLIENT_CREDS });
+  assert.equal(res.status, 200);
+  assert.equal(res.payload.provider, 'ia');
+  assert.equal(res.payload.uploadId, 'uid-9');
+  assert.ok(!JSON.stringify(res.payload).includes('client-secret'));
+  // without creds it still refuses honestly
+  globalThis.fetch = async () => { throw new Error('must not be called'); };
+  const no = await request({ action: 'sign', filename: 'v.mp4', contentType: 'video/mp4', size: 1000 });
+  assert.equal(no.status, 503);
+});
+
+test('server env credentials win over in-app credentials', async () => {
+  setEnv(IA_ENV); // AKIDEXAMPLE / secret-key / shortsfactory-videos
+  globalThis.fetch = async () => new Response('<InitiateMultipartUploadResult><UploadId>uid-env</UploadId></InitiateMultipartUploadResult>', { status: 200 });
+  const res = await request({ action: 'sign', filename: 'v.mp4', contentType: 'video/mp4', size: 1000, ...CLIENT_CREDS });
+  assert.equal(res.status, 200);
+  assert.ok(!JSON.stringify(res.payload).includes('client-secret'));
+  // the env item is used, not the client item
+  assert.ok(res.payload.publicUrl.includes('shortsfactory-videos'));
+});
+
+test('ia-part accepts credentials via headers (binary route)', async () => {
+  setEnv({ S3_ACCESS_KEY_ID: '', S3_SECRET_ACCESS_KEY: '', S3_BUCKET: '' });
+  const seen = [];
+  globalThis.fetch = async (url, opts = {}) => {
+    seen.push({ url: String(url), auth: opts.headers?.Authorization });
+    return new Response('', { status: 200, headers: { etag: '"e1"' } });
+  };
+  const res = await request(Buffer.from('abc'), 'POST', {
+    'content-type': 'application/octet-stream',
+    'x-sf-ia-access': 'client-access',
+    'x-sf-ia-secret': 'client-secret',
+    'x-sf-ia-item': 'my-shorts-item',
+  }, `/api/upload?action=ia-part&key=${encodeURIComponent(IA_KEY)}&uploadId=upid-1&partNumber=1`);
+  assert.equal(res.status, 200);
+  assert.equal(res.payload.etag, '"e1"');
+  assert.equal(seen[0].auth, 'LOW client-access:client-secret');
+  assert.ok(seen[0].url.includes('my-shorts-item'));
+});

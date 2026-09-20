@@ -68,6 +68,24 @@ export function providerOf(e = uploadEnv()) {
   return /(^|\.)archive\.org$/.test(hostOf(e.endpoint)) ? 'ia' : 's3';
 }
 
+/**
+ * Credentials the operator pasted once inside the app (stored in that browser's
+ * localStorage, same model as the AI keys). Used ONLY when no env host is
+ * configured, and only for the Internet Archive relay flow — the server keeps
+ * treating env config as the higher-priority source. Never logged, never
+ * echoed back in a response.
+ */
+export function withClientCreds(e = uploadEnv(), req = {}, body = {}) {
+  if (uploadHostConfigured(e)) return e; // server env wins
+  const headers = req.headers || {};
+  const accessKeyId = String(headers['x-sf-ia-access'] ?? body?.iaAccessKey ?? '').trim();
+  const secretAccessKey = String(headers['x-sf-ia-secret'] ?? body?.iaSecretKey ?? '').trim();
+  const bucket = String(headers['x-sf-ia-item'] ?? body?.iaItem ?? '').trim() || 'shortsfactory-videos';
+  if (!accessKeyId || !secretAccessKey) return e;
+  const merged = { ...e, accessKeyId, secretAccessKey, bucket, endpoint: IA_S3, region: 'auto' };
+  return uploadHostConfigured(merged) ? merged : e;
+}
+
 /** Item identifiers: 3–80 chars, letters/digits/._-, no "--" (reserved by IA). */
 export function validateIaItem(item) {
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]{2,79}$/.test(item) || item.includes('--')) {
@@ -362,29 +380,46 @@ export default async function handler(req, res) {
       ? (typeof req.body === 'string' ? JSON.parse(req.body) : req.body) || {}
       : { action: new URL(req.url, 'http://local').searchParams.get('action'), binary: await readRawBody(req) };
     if (!body || typeof body !== 'object') throw new UploadError('Ungültige Anfrage.', 400);
+    const e2 = withClientCreds(e, req, body);
+    const prov = uploadHostConfigured(e2) ? providerOf(e2) : null;
 
+    if (body.action === 'ia-check') {
+      // Credential check for the in-app connect form: never creates or changes anything.
+      if (!uploadHostConfigured(e2) || prov !== 'ia') throw new UploadError('Bitte access key und secret key eingeben.', 400);
+      const itemError = validateIaItem(e2.bucket);
+      if (itemError) throw new UploadError(itemError, 400);
+      const iaRes = await fetch(`${IA_S3}/${encodeURIComponent(e2.bucket)}/?uploads`, {
+        headers: { Authorization: iaAuth(e2) },
+        signal: AbortSignal.timeout(30000),
+      }).catch(() => { throw new UploadError('Internet Archive nicht erreichbar. Bitte später erneut versuchen.', 502); });
+      if ([401, 403].includes(iaRes.status)) {
+        return res.status(200).json({ ok: false, error: 'Internet Archive hat den Zugriff verweigert — bitte access key und secret key prüfen.' });
+      }
+      if (!iaRes.ok && iaRes.status !== 404) throw await iaFail(iaRes); // 404 = Schlüssel ok, Item gibt es noch nicht → wird beim ersten Upload angelegt
+      return res.status(200).json({ ok: true, item: e2.bucket });
+    }
     if (body.action === 'sign') {
-      const target = provider === 'ia'
-        ? await iaInitUpload(body, e)
-        : buildUploadTarget(body, e);
+      const target = prov === 'ia'
+        ? await iaInitUpload(body, e2)
+        : buildUploadTarget(body, e2);
       return res.status(200).json(target);
     }
     if (body.action === 'ia-direct') {
-      if (provider !== 'ia') throw new UploadError('ia-direct ist nur mit dem Internet-Archive-Endpunkt möglich.', 400);
-      return res.status(200).json(iaDirectUpload(body, e));
+      if (prov !== 'ia') throw new UploadError('ia-direct ist nur mit dem Internet-Archive-Endpunkt möglich.', 400);
+      return res.status(200).json(iaDirectUpload(body, e2));
     }
     if (body.action === 'ia-part') {
-      if (provider !== 'ia') throw new UploadError('ia-part ist nur mit dem Internet-Archive-Endpunkt möglich.', 400);
+      if (prov !== 'ia') throw new UploadError('ia-part ist nur mit dem Internet-Archive-Endpunkt möglich.', 400);
       const q = new URL(req.url, 'http://local').searchParams;
       const result = await iaUploadPart({
         key: q.get('key'), uploadId: q.get('uploadId'),
         partNumber: Number(q.get('partNumber')), body: body.binary,
-      }, e);
+      }, e2);
       return res.status(200).json(result);
     }
     if (body.action === 'ia-complete') {
-      if (provider !== 'ia') throw new UploadError('ia-complete ist nur mit dem Internet-Archive-Endpunkt möglich.', 400);
-      return res.status(200).json(await iaCompleteUpload(body, e));
+      if (prov !== 'ia') throw new UploadError('ia-complete ist nur mit dem Internet-Archive-Endpunkt möglich.', 400);
+      return res.status(200).json(await iaCompleteUpload(body, e2));
     }
     return res.status(400).json({ error: 'Unbekannte Aktion.' });
   } catch (err) {

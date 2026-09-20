@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { AlertTriangle, Check, ExternalLink, HardDriveUpload, Loader2, Send, X } from 'lucide-react';
 import type { LocalRenderItem } from '../lib/types';
 import { DEFAULT_DESCRIPTION, formatBerlinDateTime, loadBufferConfig, planSlots, saveBufferConfig, scheduleBatchPosts, validateVideoUrl, type DispatchProgress, type ScheduledPost, type ScheduleMode } from '../lib/scheduler';
-import { fetchUploadStatus, uploadRenderFile, type UploadHostStatus } from '../lib/uploader';
+import { fetchUploadStatus, uploadRenderFile, checkIaCredentials, clearIaCredentials, loadIaCredentials, saveIaCredentials, type IaCredentials, type UploadHostStatus } from '../lib/uploader';
 import { videoFileName } from './MissionControl';
 import BufferChannels from './BufferChannels';
 
@@ -35,6 +35,12 @@ export default function PostScheduleModal({ targetItems, existingPosts, autoStar
   const [rows, setRows] = useState(() => targetItems.filter(i => i.status === 'done').map(item => ({ item, selected: true, url: item.publicUrl ?? '', title: item.idea })));
   const [bulkUrls, setBulkUrls] = useState('');
   const [host, setHost] = useState<UploadHostStatus | null>(null);
+  const [iaCreds, setIaCreds] = useState<IaCredentials | null>(loadIaCredentials);
+  const [iaAccess, setIaAccess] = useState('');
+  const [iaSecret, setIaSecret] = useState('');
+  const [iaItem, setIaItem] = useState('shortsfactory-videos');
+  const [connecting, setConnecting] = useState(false);
+  const [connectMsg, setConnectMsg] = useState('');
   const [manualLinks, setManualLinks] = useState(false);
   const [uploads, setUploads] = useState<Record<number, UploadState>>({});
   const [uploadDone, setUploadDone] = useState(0);
@@ -50,7 +56,9 @@ export default function PostScheduleModal({ targetItems, existingPosts, autoStar
   const plan = { mode, count: active.length, times: times.split(/[,\s]+/).filter(Boolean), startDate, dayStep };
   const slots = planSlots(existingPosts, plan);
   const total = active.length * config.defaultPlatforms.length;
-  const uploadMode = Boolean(host?.configured) && !manualLinks;
+  const envUpload = Boolean(host?.configured);
+  const iaLocal = !envUpload && Boolean(iaCreds);
+  const uploadMode = (envUpload || iaLocal) && !manualLinks;
   const repeatWarnings = useMemo(() => uploadMode
     ? active.filter(r => existingPosts.some(p => p.title === r.title && p.status !== 'Fehler')).map(r => `Video ${String(r.item.index + 1).padStart(2, '0')}`)
     : [], [uploadMode, active, existingPosts]);
@@ -76,11 +84,43 @@ export default function PostScheduleModal({ targetItems, existingPosts, autoStar
 
   function ack(checked: boolean) {
     setAcknowledged(checked);
-    if (uploadMode && checked) { try { localStorage.setItem(UPLOAD_CONSENT_KEY, '1'); } catch { /* private mode */ } }
+    if (uploadMode) {
+      // remember or revoke the upload consent (second batch onward = one press)
+      try { checked ? localStorage.setItem(UPLOAD_CONSENT_KEY, '1') : localStorage.removeItem(UPLOAD_CONSENT_KEY); } catch { /* private mode */ }
+    }
   }
 
   function uploadStateOf(index: number): UploadState {
     return uploads[index] ?? { status: 'pending', loaded: 0, total: 0 };
+  }
+
+  async function connectIa() {
+    if (connecting) return;
+    const accessKey = iaAccess.trim(); const secretKey = iaSecret.trim(); const item = iaItem.trim() || 'shortsfactory-videos';
+    if (!accessKey || !secretKey) { setConnectMsg('Bitte access key und secret key eingeben (archive.org/account/s3.php).'); return; }
+    setConnecting(true); setConnectMsg('Prüfe Schlüssel beim Internet Archive …');
+    try {
+      const result = await checkIaCredentials({ accessKey, secretKey, item });
+      if (result.ok) {
+        const creds = { accessKey, secretKey, item };
+        saveIaCredentials(creds);
+        setIaCreds(creds);
+        setIaSecret('');
+        setConnectMsg('');
+      } else {
+        setConnectMsg(result.error || 'Verbindung nicht bestätigt. Bitte Schlüssel prüfen.');
+      }
+    } catch (e) {
+      setConnectMsg(e instanceof Error ? e.message : String(e));
+    } finally {
+      setConnecting(false);
+    }
+  }
+
+  function disconnectIa() {
+    clearIaCredentials();
+    setIaCreds(null);
+    setManualLinks(false);
   }
 
   async function send() {
@@ -108,6 +148,7 @@ export default function PostScheduleModal({ targetItems, existingPosts, autoStar
               filename: videoFileName(row.item),
               contentType: row.item.mime || 'video/mp4',
               signal,
+              iaCreds,
               onProgress: p => setUploads(s => ({ ...s, [row.item.index]: { status: 'uploading', loaded: p.loaded, total: p.total || size } })),
             });
             uploadedUrls[row.item.index] = publicUrl;
@@ -160,12 +201,28 @@ export default function PostScheduleModal({ targetItems, existingPosts, autoStar
       </div> : <div className="mt-5 grid gap-6">
         {uploadMode ? <div className="flex items-start gap-2 border border-volt-400/40 bg-volt-400/5 p-3 font-mono text-xs leading-relaxed text-coal-200">
           <HardDriveUpload className="mt-0.5 size-4 shrink-0 text-volt-300" />
-          <span>{host?.provider === 'ia'
-            ? <>Internet Archive verbunden (Item <strong>{host?.bucket}</strong>) — komplett kostenlos, ohne Limits. Du musst <strong>keine Links mehr eintragen</strong>: Jedes fertige Video wird automatisch hochgeladen und Buffer erhält den dauerhaften öffentlichen Link.</>
-            : <>Upload-Host <strong>{host?.bucket}</strong> (S3) verbunden — du musst <strong>keine Links mehr eintragen</strong>. Jedes fertige Video wird automatisch hochgeladen und Buffer erhält den dauerhaften öffentlichen Link.</>} Modus: <button type="button" disabled={submitting} onClick={() => setManualLinks(true)} className="text-volt-300 underline">stattdessen eigene Links eintragen</button></span>
+          <span>{envUpload && host?.provider === 'ia'
+            ? <>Internet Archive verbunden (Item <strong>{host?.bucket}</strong>, serverseitig) — komplett kostenlos, ohne Limits. Du musst <strong>keine Links mehr eintragen</strong>: Jedes fertige Video wird automatisch hochgeladen und Buffer erhält den dauerhaften öffentlichen Link.</>
+            : iaLocal
+              ? <>Internet Archive verbunden (Item <strong>{iaCreds?.item}</strong>) — komplett kostenlos, ohne Limits. Die Schlüssel liegen <strong>nur in diesem Browser</strong> gespeichert (wie deine AI-Keys) und werden bei jedem Versand automatisch mitgeschickt. <button type="button" disabled={submitting} onClick={disconnectIa} className="text-volt-300 underline">Verbindung trennen</button></>
+              : <>Upload-Host <strong>{host?.bucket}</strong> (S3) verbunden — du musst <strong>keine Links mehr eintragen</strong>. Jedes fertige Video wird automatisch hochgeladen und Buffer erhält den dauerhaften öffentlichen Link.</>} Modus: <button type="button" disabled={submitting} onClick={() => setManualLinks(true)} className="text-volt-300 underline">stattdessen eigene Links eintragen</button></span>
         </div> : <div className="grid gap-3 border border-amber-warn/40 bg-amber-warn/5 p-3 font-mono text-xs leading-relaxed text-coal-200">
-          <span>Kein Upload-Host eingerichtet. Aktuell trägst du pro Video eine öffentliche HTTPS-Adresse ein. Einmal einrichten — danach nie wieder Links eintippen:</span>
-          <details><summary className="cursor-pointer text-volt-300">Option A (empfohlen): Internet Archive — komplett kostenlos, ohne Limits, ohne Kreditkarte</summary>
+          <span>Kein Upload-Host eingerichtet. Einmal verbinden — danach nie wieder etwas eintragen oder hochladen auf fremde Hosts:</span>
+          <div className="grid gap-2 border border-volt-400/40 bg-coal-950/40 p-3">
+            <p className="font-mono text-xs text-paper-100"><strong>Option A (empfohlen): Internet Archive direkt verbinden</strong> — komplett kostenlos, ohne Limits, ohne Kreditkarte. Reicht einmal; gespeichert wird nur in diesem Browser.</p>
+            <div className="grid gap-2 sm:grid-cols-2">
+              <label className="font-mono text-xs text-coal-300">Access Key<input value={iaAccess} onChange={e => setIaAccess(e.target.value)} autoComplete="off" placeholder="aus archive.org/account/s3.php" className={inputClass} /></label>
+              <label className="font-mono text-xs text-coal-300">Secret Key<input type="password" value={iaSecret} onChange={e => setIaSecret(e.target.value)} autoComplete="new-password" placeholder="aus archive.org/account/s3.php" className={inputClass} /></label>
+            </div>
+            <label className="max-w-xs font-mono text-xs text-coal-300">Item-Name (wird automatisch angelegt)<input value={iaItem} onChange={e => setIaItem(e.target.value)} className={inputClass} /></label>
+            <div className="flex flex-wrap items-center gap-3">
+              <button type="button" disabled={connecting} onClick={connectIa} className="bg-heat border border-volt-400 px-4 py-2.5 font-display text-xs font-black text-coal-950 uppercase disabled:opacity-50">{connecting ? 'Prüfe …' : 'Mit Internet Archive verbinden'}</button>
+              <a href="https://archive.org/account/s3.php" target="_blank" rel="noreferrer" className="flex items-center gap-1 font-mono text-[10px] text-volt-300"><ExternalLink className="size-3" /> Schlüssel abrufen (kostenloses Konto)</a>
+            </div>
+            {connectMsg && <p role="status" className="font-mono text-[10px] text-amber-warn">{connectMsg}</p>}
+            <p className="font-mono text-[10px] text-coal-400">Keine URLs, keine Env-Variablen, kein CORS. Nach dem Verbinden lädt dieser Versand automatisch hoch und sendet an Buffer.</p>
+          </div>
+          <details><summary className="cursor-pointer text-volt-300">Option A serverseitig (Env-Variablen) — wenn mehrere Browser denselben Host nutzen sollen</summary>
             <div className="mt-2 grid gap-2">
               <p>1. Kostenloses Konto auf <a href="https://archive.org" target="_blank" rel="noreferrer" className="text-volt-300 underline">archive.org</a> anlegen (nur E-Mail, keine Zahlungsmethode).</p>
               <p>2. S3-Schlüssel abrufen: <a href="https://archive.org/account/s3.php" target="_blank" rel="noreferrer" className="text-volt-300 underline">archive.org/account/s3.php</a> → <strong>access key</strong> + <strong>secret key</strong> notieren.</p>
