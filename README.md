@@ -18,6 +18,11 @@ Optimised for desktop **and** iPhone / iPad (iOS 17+ recommended).
    in the status bar aborts a running batch.
 3. **Bundle → ZIP** — packs all finished blobs locally and fires a real
    `<a href="blob:" download>` link (Safari-safe).
+4. **Alle posten — ein Klick** — the big **ALLE N VIDEOS AUF EINMAL POSTEN**
+   button in the Output Bay opens the dispatch window with everything
+   preselected. One confirmation press: every finished video is uploaded to
+   your configured upload host (if set up) and then handed to Buffer
+   **one after another with a short pause**, so all ten reliably go through.
 
 ## Clip Mill — one source → ten clips
 
@@ -84,16 +89,102 @@ insbesondere werden alte simulierte IDs nicht als echte Buffer-Posts behandelt.
 Ohne Key wird der Versand ausdrücklich abgelehnt. Kein Simulationsmodus,
 keine erfundenen Post-IDs und keine falschen Erfolgsmeldungen.
 
-### Ohne Vercel Blob / ohne neuen Speicherdienst
+Ohne Key wird der Versand ausdrücklich abgelehnt. Kein Simulationsmodus,
+keine erfundenen Post-IDs und keine falschen Erfolgsmeldungen.
+
+### Upload-Host — einmal einrichten, nie wieder Links eintippen
 
 Buffer akzeptiert **keine direkten Datei-Uploads per API**, sondern benötigt
-öffentlich abrufbare Medien-URLs. Diese Variante nutzt auf Wunsch **dein eigenes
-Hosting** und fügt keinen Storage-Dienst hinzu:
+öffentlich abrufbare Medien-URLs. Der Mittelweg dafür ist ein **Upload-Host**:
+ein S3-kompatibler Bucket (Cloudflare R2, Backblaze B2, AWS S3 oder MinIO),
+der **genau einmal** mit dieser App verbunden wird. Danach lädt die App jedes
+fertig gerenderte Video selbst hoch und übergibt Buffer den dauerhaften
+öffentlichen Link — **kein manuelles Eintippen von Links mehr**. Die Videos
+fließen dabei direkt aus dem Browser in den Bucket; dieser Server signiert nur
+die Upload-URL und berührt die Videodaten nie (Serverless-Body-Limits bleiben
+nicht relevant).
+
+Einmalige Einrichtung:
+
+1. Bucket anlegen und **öffentlichen Lesezugriff** aktivieren:
+   * **Cloudflare R2** → Settings → Public access: *r2.dev-Subdomain* erlauben
+     (oder eigene Domain anbinden — für Produktion empfohlen, r2.dev ist
+     ratenlimitiert). R2 ist Buffer-seitig ausdrücklich als Hosting empfohlen
+     und im Free Tier enthalten (10 GB).
+   * **Backblaze B2** → Bucket-Settings → *Files in bucket are: Public*.
+   * **AWS S3** → Bucket-Policy mit `s3:GetObject` für `*`.
+2. **CORS-Regel** im Bucket hinterlegen, damit der Browser hochladen darf
+   (PUT/GET/HEAD von der App-Origin, Allowed Header `content-type`):
+
+   ```json
+   [
+     {
+       "AllowedOrigins": ["https://deine-app.vercel.app", "http://localhost:5173"],
+       "AllowedMethods": ["PUT", "GET", "HEAD"],
+       "AllowedHeaders": ["content-type"],
+       "MaxAgeSeconds": 3600
+     }
+   ]
+   ```
+
+3. Zugangsdaten **ausschließlich als Server-Umgebungsvariablen** setzen
+   (lokal `.env.local`, auf Vercel Projekteinstellungen), dann neu
+   starten/deployen. Kein `VITE_`-Präfix!
+
+   ```bash
+   S3_ACCESS_KEY_ID=…
+   S3_SECRET_ACCESS_KEY=…
+   S3_BUCKET=…
+   S3_REGION=auto              # R2: auto · AWS: z. B. eu-central-1 · B2: z. B. us-west-004
+   S3_ENDPOINT=…               # R2: https://<accountid>.r2.cloudflarestorage.com · B2: https://s3.<region>.backblazeb2.com · AWS: leer lassen
+   S3_PUBLIC_BASE_URL=…        # R2: https://pub-<hash>.r2.dev oder eigene Domain · AWS/B2: wird automatisch abgeleitet
+   ```
+
+4. App neu laden: Das Versandfenster zeigt **„Upload-Host verbunden“** und der
+   Ablauf ist ab jetzt: einen Knopf drücken → alle Videos werden nacheinander
+   hochgeladen → jeder Post geht mit kurzer Pause an Buffer.
+
+Hinweise: Pro Upload erzeugt die App einen eindeutigen Schlüssel unter
+`shortsfactory/<datum>/…` — es wird nie etwas überschrieben. Die erzeugten
+Links sind dauerhaft (keine ablaufenden Signaturen), damit Buffer sie bis zur
+Veröffentlichung abrufen kann. Aufräumen: alte Dateien im Bucket entweder
+manuell löschen oder per Lifecycle-Regel (z. B. nach 30 Tagen). R2/MinIO ohne
+ableitbare öffentliche Adresse verlangen zwingend `S3_PUBLIC_BASE_URL`; die
+Route lehnt den Versand in dem Fall mit einer klaren Fehlermeldung ab, statt
+Links zu erzeugen, die Buffer nie abrufen könnte.
+
+### Der Ein-Klick-Versand (alle 10 auf einmal)
+
+**ALLE N VIDEOS AUF EINMAL POSTEN** in der Output Bay öffnet das Versandfenster
+vorausgewählt: alle fertigen Videos markiert, Kanäle, Beschreibung und Modus
+aus der letzten Einrichtung übernommen. Ein Startdruck führt dann aus:
+
+1. **Upload-Phase** — jedes ausgewählte Video wird nacheinander in den
+   Upload-Host übertragen (Fortschrittsbalken je Video). Schlägt ein Upload
+   fehl oder wird abgebrochen, wurde **noch nichts an Buffer gesendet**.
+2. **Versand-Phase** — die Posts gehen wie gewohnt **sequenziell mit kurzer
+   Pause** (Standard 3 Sekunden nach jeder Buffer-Antwort, einstellbar
+   2–60 Sekunden) an Buffer, damit zuverlässig alle Videos durchgehen. Kein
+   paralleler Versand; Tab offen lassen; Stop beendet nach dem aktuellen Post.
+
+Bereits hochgeladene Videos werden wiederverwendet (kein Doppel-Upload);
+pro Video gibt es „Erneut hochladen“, um bewusst einen neuen Link zu erzeugen.
+Sendet das Journal bereits nicht fehlgeschlagene Posts mit denselben Titeln,
+verlangt das Fenster eine zusätzliche Bestätigung gegen versehentliche
+Doppelposts. Wer partout keinen Upload-Host einrichten will, schaltet im
+Fenster auf „stattdessen eigene Links eintragen“ um (siehe Fallback unten).
+
+### Ohne Upload-Host (Fallback): Links manuell eintragen
+
+Auch ohne eingerichteten Upload-Host funktioniert der Versand — mit **deinem
+eigenen Hosting** und ohne zusätzlichen Storage-Dienst:
 
 1. Videos fertig rendern und einzeln oder als ZIP herunterladen.
 2. Die **fertigen Ausgabedateien** auf dein vorhandenes Hosting laden.
-3. **An Buffer · N Videos** in der Output Bay anklicken.
-4. Pro Video den direkten HTTPS-Link eintragen — alternativ alle Links
+3. **ALLE N VIDEOS AUF EINMAL POSTEN** in der Output Bay anklicken (oder den
+   BUFFER-Knopf auf einer einzelnen Karte für ein einzelnes Video).
+4. Im Fenster auf „stattdessen eigene Links eintragen“ schalten, dann pro Video
+   den direkten HTTPS-Link eintragen — alternativ alle Links
    zeilenweise in derselben Reihenfolge einfügen. Einzelne Videos lassen sich
    abwählen. Die lokale Vorschau hilft beim Zuordnen.
 5. Links ohne Login in einem privaten Browserfenster prüfen und bestätigen.
@@ -235,7 +326,8 @@ Same origin → no CORS, no apikey, no Supabase anon key, no configuration.
 | Captions | WordBoundary timestamps grouped into N-word cues, drawn on canvas |
 | Rendering | Canvas 2D + WebAudio graph + MediaRecorder, real-time capture, MP4/H.264 on Safari with automatic WebM fallback |
 | ZIP | JSZip (STORE) → blob anchor, fully local |
-| Your files | Sources and renders stay local; only your explicit public video links and post text go to Buffer |
+| Your files | Sources and renders stay local; with an upload host, finished renders go straight from the browser into your own bucket |
+| Upload host | Browser → `/api/upload` (presigned PUT, SigV4) → your S3-compatible bucket; permanent public URL comes back for Buffer |
 | Buffer | Browser → `/api/buffer` → `https://api.buffer.com` GraphQL; key stays server-side |
 
 Rendering is real-time: a 40-second voice takes ~40 seconds per unit, and the
@@ -260,7 +352,7 @@ src/
 api/        ← TTS + Buffer relays (Vercel Serverless Functions, Node.js)
 shared/     ← public URL validation + Buffer payload building
 server/     ← same-origin API middleware for local Vite development
-tests/      ← Buffer relay, dispatch, scheduling and intro regression tests
+tests/      ← Buffer relay, dispatch, scheduling, upload signing and intro regression tests
 supabase/   ← inert legacy v1 (hosted Edge Functions + Shotstack), unused
 ```
 

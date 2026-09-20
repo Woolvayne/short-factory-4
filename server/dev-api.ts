@@ -9,7 +9,12 @@ export function localApi(): Plugin {
     configureServer(server) {
       server.middlewares.use(async (req: IncomingMessage, res: ServerResponse, next) => {
         const endpoint = req.url?.split('?')[0];
-        if (endpoint !== '/api/buffer' && endpoint !== '/api/tts') return next();
+        const apiModule =
+          endpoint === '/api/buffer' ? 'api/buffer.js'
+          : endpoint === '/api/upload' ? 'api/upload.js'
+          : endpoint === '/api/tts' ? 'api/tts.js'
+          : null;
+        if (!apiModule) return next();
         try {
           let raw = '';
           for await (const chunk of req) {
@@ -21,7 +26,7 @@ export function localApi(): Plugin {
             status(code: number) { res.statusCode = code; return response; },
             json(data: unknown) { res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify(data)); return response; },
           });
-          const modulePath = pathToFileURL(path.join(server.config.root, endpoint === '/api/buffer' ? 'api/buffer.js' : 'api/tts.js')).href;
+          const modulePath = pathToFileURL(path.join(server.config.root, apiModule)).href;
           const { default: handler } = await import(modulePath);
           await handler(request, response);
         } catch {
