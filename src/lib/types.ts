@@ -23,6 +23,8 @@ export interface LocalRenderItem {
   duration?: number;
   blob?: Blob;
   blobUrl?: string;
+  /** Permanent public URL of the uploaded render — reused so nothing is uploaded twice. */
+  publicUrl?: string;
   error?: string;
 }
 

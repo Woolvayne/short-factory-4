@@ -354,7 +354,7 @@ export function OutputPanel({
   activeProgress: number;
   onBuildZip: () => void;
   onRenderOne: (index: number) => void;
-  onPostItems: (targetItems: LocalRenderItem[]) => void;
+  onPostItems: (targetItems: LocalRenderItem[], autoStart?: boolean) => void;
 }) {
   const [preview, setPreview] = useState<LocalRenderItem | null>(null);
   const doneCount = items.filter((r) => r.status === "done").length;
@@ -567,11 +567,12 @@ export function OutputPanel({
             {doneCount > 0 && (
               <button
                 type="button"
-                onClick={() => onPostItems(items.filter((i) => i.status === "done"))}
-                className="bg-heat flex min-h-[44px] items-center gap-2 border border-volt-400 px-4 py-2.5 font-display text-sm font-black tracking-tight text-coal-950 uppercase transition-opacity hover:opacity-90"
+                onClick={() => onPostItems(items.filter((i) => i.status === "done"), true)}
+                className="glow-volt bg-heat flex min-h-[44px] items-center gap-2 border border-volt-400 px-4 py-2.5 font-display text-sm font-black tracking-tight text-coal-950 uppercase transition-opacity hover:opacity-90"
+                title="Ein Klick: alle fertigen Videos hochladen und nacheinander mit kurzer Pause an Buffer senden"
               >
                 <Send className="size-4" strokeWidth={2.5} />
-                An Buffer · {doneCount} Video{doneCount === 1 ? "" : "s"}
+                Alle {doneCount} Videos auf einmal posten
               </button>
             )}
             {zip.url && zip.name ? (

@@ -117,6 +117,7 @@ export default function App() {
   const [scheduledPosts, setScheduledPosts] = useState<ScheduledPost[]>(() => loadLocalPosts());
   const [hasBufferKey, setHasBufferKey] = useState(false);
   const [postModalItems, setPostModalItems] = useState<LocalRenderItem[] | null>(null);
+  const [postModalAuto, setPostModalAuto] = useState(false);
   const [vaultReady, setVaultReady] = useState(false);
 
   const factoryRef = useRef<HTMLDivElement>(null);
@@ -884,7 +885,10 @@ export default function App() {
             activeProgress={activeProgress}
             onBuildZip={buildZip}
             onRenderOne={renderOne}
-            onPostItems={(targets) => setPostModalItems(targets)}
+            onPostItems={(targets, autoStart) => {
+              setPostModalAuto(Boolean(autoStart));
+              setPostModalItems(targets);
+            }}
           />
         </div>
 
@@ -928,9 +932,17 @@ export default function App() {
         <PostScheduleModal
           targetItems={postModalItems}
           existingPosts={scheduledPosts}
+          autoStart={postModalAuto}
           onClose={() => setPostModalItems(null)}
           onScheduled={(allPosts) => setScheduledPosts(allPosts)}
           onOpenCalendar={() => jumpTo("calendar")}
+          onUploadedImage={(index, publicUrl) =>
+            setItems((prev) =>
+              prev.map((it) =>
+                it.index === index ? { ...it, publicUrl: publicUrl || undefined } : it
+              )
+            )
+          }
         />
       )}
 
