@@ -12,7 +12,7 @@ const UPLOAD_CONSENT_KEY = 'shortsfactory.buffer_upload_consent.v1';
 const readUploadConsent = () => { try { return localStorage.getItem(UPLOAD_CONSENT_KEY) === '1'; } catch { return false; } };
 const CORS_SNIPPET = `[
   {
-    "AllowedOrigins": ["https://deine-app.vercel.app", "http://localhost:5173"],
+    "AllowedOrigins": ["*"],
     "AllowedMethods": ["PUT", "GET", "HEAD"],
     "AllowedHeaders": ["content-type"],
     "MaxAgeSeconds": 3600

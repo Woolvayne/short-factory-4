@@ -114,12 +114,14 @@ Einmalige Einrichtung:
    * **Backblaze B2** → Bucket-Settings → *Files in bucket are: Public*.
    * **AWS S3** → Bucket-Policy mit `s3:GetObject` für `*`.
 2. **CORS-Regel** im Bucket hinterlegen, damit der Browser hochladen darf
-   (PUT/GET/HEAD von der App-Origin, Allowed Header `content-type`):
+   (PUT/GET/HEAD, Allowed Header `content-type`). `"*"` als Origin ist hier
+   okay: Schreiben funktioniert nur mit deiner gültigen Signatur, Lesen ist
+   ohnehin öffentlich:
 
    ```json
    [
      {
-       "AllowedOrigins": ["https://deine-app.vercel.app", "http://localhost:5173"],
+       "AllowedOrigins": ["*"],
        "AllowedMethods": ["PUT", "GET", "HEAD"],
        "AllowedHeaders": ["content-type"],
        "MaxAgeSeconds": 3600
@@ -143,6 +145,88 @@ Einmalige Einrichtung:
 4. App neu laden: Das Versandfenster zeigt **„Upload-Host verbunden“** und der
    Ablauf ist ab jetzt: einen Knopf drücken → alle Videos werden nacheinander
    hochgeladen → jeder Post geht mit kurzer Pause an Buffer.
+
+#### Konkret: Cloudflare R2 (empfohlen) — einmal durchklicken, fertig
+
+Warum R2: **10 GB Speicher + 1 Mio. Schreib-/10 Mio. Lese-Operationen pro Monat
+kostenlos**, kein Traffic-Entgelt (Egress frei), von Buffers eigener Hilfe als
+Hosting für API-Posts empfohlen, EU-Standort wählbar. Es fällt **kein Abo
+an** — Cloudflare verlangt nur eine Zahlungsmethode (Karte/PayPal) zur
+Freischaltung von R2. Bei ~10 Shorts à 10–30 MB pro Woche bleibt man weit
+innerhalb des kostenlosen Kontingents.
+
+1. **Konto:** Auf [dash.cloudflare.com](https://dash.cloudflare.com) ein
+   kostenloses Konto anlegen (E-Mail + Passwort, Free-Plan genügt).
+2. **R2 freischalten:** Links im Menü **R2 Object Storage** wählen und die
+   Einmal-Aktivierung durchführen (kostenloses Kontingent, Zahlungsmethode
+   hinterlegen — erst danach wird R2 freigeschaltet).
+3. **Bucket anlegen:** **R2 → Overview → Create bucket**. Name z. B.
+   `shortsfactory`, Location-Hint **European Union**. Anschließend im Bucket
+   unter **Settings → Public Development URL → Enable** aktivieren (in dem
+   Dialog `allow` eintippen). Notiere die Adresse — das ist später
+   `S3_PUBLIC_BASE_URL=https://pub-<hash>.r2.dev`.
+4. **CORS-Regel:** Gleiche Seite (**Settings**) → **CORS Policy → Add CORS
+   policy** (JSON-Tab) → das JSON von oben einfügen → Save.
+5. **API-Token:** **R2 → Overview → (rechts) Manage R2 API Tokens → Create API
+   Token** → Name egal, **Permissions: Object Read & Write**, **Specify
+   bucket(s)** → nur den neuen Bucket → Create. Die Seite zeigt **Access Key
+   ID**, **Secret Access Key** und den **S3-Endpoint**
+   `https://<accountid>.r2.cloudflarestorage.com`. Die Keys sind **nur einmal
+   sichtbar** — direkt notieren.
+6. **App verbinden:**
+   * **Lokal:** im Projektordner `.env.local` anlegen:
+
+     ```bash
+     S3_ACCESS_KEY_ID=…            # aus Schritt 5
+     S3_SECRET_ACCESS_KEY=…        # aus Schritt 5
+     S3_BUCKET=shortsfactory
+     S3_REGION=auto
+     S3_ENDPOINT=https://<accountid>.r2.cloudflarestorage.com
+     S3_PUBLIC_BASE_URL=https://pub-<hash>.r2.dev
+     ```
+
+     dann `npm run dev` neu starten.
+   * **Vercel:** [vercel.com](https://vercel.com) → Projekt → **Settings →
+     Environment Variables** → dieselben sechs Variablen (plus vorhandenes
+     `BUFFER_API_KEY`) für Production **und** Preview eintragen →
+     **Deployments → Redeploy** (Umgebungsvariablen gelten erst im neuen
+     Deployment). Deployment unbedingt mit **Deployment Protection**
+     absichern — die App ist ein privates Operator-Werkzeug.
+7. **Testen:** App öffnen → Video rendern → **Alle N Videos auf einmal
+   posten** → oben muss **„Upload-Host shortsfactory verbunden — du musst
+   keine Links mehr eintragen“** stehen. Gegenprobe: die `pub-…r2.dev`-Adresse
+   eines hochgeladenen Videos in einem privaten Browserfenster öffnen — das
+   Video muss direkt spielen/laden.
+
+**Aufräumen (optional):** Bucket → **Settings → Lifecycle Rules** → Regel für
+Präfix `shortsfactory/` mit „Delete objects after N days“ (z. B. 30) — alte
+Renders verschwinden automatisch und der Speicher bleibt im Free Tier.
+
+**Eigene Domain (optional, später):** r2.dev ist in der Bandbreite gedrosselt,
+für diesen Zweck aber völlig ausreichend, weil Buffer die Datei serverseitig
+und nur einmal pro Post abruft. Wer will: Domain bei Cloudflare registrieren
+(≈ 10 $/Jahr, zum Einstandspreis) → Bucket → **Settings → Custom Domains →
+Connect Domain** → statt der r2.dev-Adresse die eigene Domain als
+`S3_PUBLIC_BASE_URL` eintragen.
+
+**Alternativen:** **Backblaze B2** ([backblaze.com](https://www.backblaze.com),
+10 GB frei): Bucket anlegen → Bucket Settings → *Files in bucket are Public* →
+dieselbe CORS-Regel eintragen (Feld „CORS Rules“) → Endpoint
+`https://s3.<region>.backblazeb2.com` (Region z. B. `us-west-004` oder
+`eu-central-003`); `S3_PUBLIC_BASE_URL` wird automatisch abgeleitet.
+**AWS S3** ([aws.amazon.com](https://aws.amazon.com)): nach den allgemeinen
+Schritten oben, Endpoint leer lassen; kostet jenseits des Free Tier auch
+Egress — daher R2 vorziehen.
+
+**Kurz-Troubleshooting:**
+
+| Symptom | Ursache / Fix |
+| --- | --- |
+| Versandfenster zeigt weiter „Kein Upload-Host eingerichtet“ | Env-Vars fehlen im Prozess — nach `.env.local`-Änderung dev-Server neu starten; auf Vercel neu deployen |
+| „Upload fehlgeschlagen — prüfe die CORS-Freigabe“ | CORS-Regel fehlt/falsch (Schritt 4) — exakt das JSON oben eintragen |
+| „S3_PUBLIC_BASE_URL fehlt“ | r2.dev-Public-URL nicht als `S3_PUBLIC_BASE_URL` gesetzt (Schritt 3/6) |
+| Upload ok, aber Buffer meldet Medienfehler | Public-URL in privatem Fenster testen — sie muss das Video direkt ausliefern; prüfen, ob r2.dev noch aktiviert ist |
+| r2.dev wirkt langsam / gedrosselt | Eigene Domain anbinden (oben) |
 
 Hinweise: Pro Upload erzeugt die App einen eindeutigen Schlüssel unter
 `shortsfactory/<datum>/…` — es wird nie etwas überschrieben. Die erzeugten
