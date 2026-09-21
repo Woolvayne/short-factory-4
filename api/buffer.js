@@ -1,5 +1,6 @@
 /** Buffer GraphQL relay. No file uploads, /tmp database, API keys in the client, or simulated success. */
 import { buildPostInput } from '../shared/buffer.js';
+import { requirePassword } from '../shared/auth.js';
 export const config = { runtime: 'nodejs', maxDuration: 60 };
 
 class ApiError extends Error {
@@ -39,6 +40,7 @@ export default async function handler(req, res) {
     res.setHeader('Allow', 'GET, POST');
     return res.status(405).json({ error: 'Method not allowed' });
   }
+  if (!requirePassword(req, res)) return;
   const hasApiKey = Boolean(process.env.BUFFER_API_KEY?.trim());
   if (req.method === 'GET') return res.status(200).json({ hasApiKey });
   if (!hasApiKey) return res.status(503).json({ error: 'BUFFER_API_KEY fehlt auf dem Server. Es wurde nichts gesendet.', uncertain: false });

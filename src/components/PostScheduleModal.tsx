@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { AlertTriangle, Check, ExternalLink, HardDriveUpload, Loader2, Send, X } from 'lucide-react';
 import type { LocalRenderItem } from '../lib/types';
 import { DEFAULT_DESCRIPTION, formatBerlinDateTime, loadBufferConfig, planSlots, saveBufferConfig, scheduleBatchPosts, validateVideoUrl, type DispatchProgress, type ScheduledPost, type ScheduleMode } from '../lib/scheduler';
-import { fetchUploadStatus, uploadRenderFile, checkBlobToken, clearBlobToken, loadBlobToken, saveBlobToken, type UploadHostStatus } from '../lib/uploader';
+import { fetchUploadStatus, loadUploadProvider, providerLabel, saveUploadProvider, uploadRenderFile, type UploadHostStatus, type UploadProvider } from '../lib/uploader';
 import { videoFileName } from './MissionControl';
 import BufferChannels from './BufferChannels';
 
@@ -26,10 +26,8 @@ export default function PostScheduleModal({ targetItems, existingPosts, autoStar
   const [dayStep, setDayStep] = useState(1);
   const [rows, setRows] = useState(() => targetItems.filter(i => i.status === 'done').map(item => ({ item, selected: true, url: item.publicUrl ?? '', title: item.idea })));
   const [host, setHost] = useState<UploadHostStatus | null>(null);
-  const [blobToken, setBlobToken] = useState<string | null>(loadBlobToken);
-  const [tokenInput, setTokenInput] = useState('');
-  const [connecting, setConnecting] = useState(false);
-  const [connectMsg, setConnectMsg] = useState('');
+  const [provider, setProvider] = useState<UploadProvider>(loadUploadProvider);
+  const [providerMsg, setProviderMsg] = useState('');
   const [uploads, setUploads] = useState<Record<number, UploadState>>({});
   const [uploadDone, setUploadDone] = useState(0);
   const [uploadTotal, setUploadTotal] = useState(0);
@@ -44,9 +42,8 @@ export default function PostScheduleModal({ targetItems, existingPosts, autoStar
   const plan = { mode, count: active.length, times: times.split(/[,\s]+/).filter(Boolean), startDate, dayStep };
   const slots = planSlots(existingPosts, plan);
   const total = active.length * config.defaultPlatforms.length;
-  const envUpload = Boolean(host?.configured); // server env BLOB_READ_WRITE_TOKEN
-  const appToken = !envUpload && Boolean(blobToken); // token lives in this browser only
-  const connected = envUpload || appToken;
+  const selectedProvider = host?.providers?.[provider];
+  const connected = Boolean(selectedProvider?.configured);
   const repeatWarnings = useMemo(() => connected
     ? active.filter(r => existingPosts.some(p => p.title === r.title && p.status !== 'Fehler')).map(r => `Video ${String(r.item.index + 1).padStart(2, '0')}`)
     : [], [connected, active, existingPosts]);
@@ -57,7 +54,13 @@ export default function PostScheduleModal({ targetItems, existingPosts, autoStar
 
   useEffect(() => {
     const controller = new AbortController();
-    fetchUploadStatus(controller.signal).then(setHost).catch(() => setHost({ configured: false }));
+    fetchUploadStatus(controller.signal).then(status => {
+      setHost(status);
+      const saved = loadUploadProvider();
+      if (status.providers[saved]?.configured) setProvider(saved);
+      else if (status.providers[status.provider]?.configured) setProvider(status.provider);
+      else setProvider('puter');
+    }).catch(() => setHost(null));
     return () => controller.abort();
   }, []);
   useEffect(() => {
@@ -81,31 +84,10 @@ export default function PostScheduleModal({ targetItems, existingPosts, autoStar
     return uploads[index] ?? { status: 'pending', loaded: 0, total: 0 };
   }
 
-  async function connectBlob() {
-    if (connecting) return;
-    const token = tokenInput.trim();
-    if (!token) { setConnectMsg('Bitte das Read/Write-Token einfügen (vercel.com → Projekt → Storage → Blob).'); return; }
-    setConnecting(true); setConnectMsg('Prüfe Token bei Vercel Blob …');
-    try {
-      const result = await checkBlobToken(token);
-      if (result.ok) {
-        saveBlobToken(token);
-        setBlobToken(token);
-        setTokenInput('');
-        setConnectMsg('');
-      } else {
-        setConnectMsg(result.error || 'Verbindung nicht bestätigt. Bitte das Token prüfen.');
-      }
-    } catch (e) {
-      setConnectMsg(e instanceof Error ? e.message : String(e));
-    } finally {
-      setConnecting(false);
-    }
-  }
-
-  function disconnectBlob() {
-    clearBlobToken();
-    setBlobToken(null);
+  function selectProvider(next: UploadProvider) {
+    setProvider(next);
+    saveUploadProvider(next);
+    setProviderMsg('');
   }
 
   async function send() {
@@ -119,7 +101,7 @@ export default function PostScheduleModal({ targetItems, existingPosts, autoStar
     const uploadedUrls: Record<number, string> = {};
     try {
       saveBufferConfig(config);
-      // Phase 1 — push every selected video to Vercel Blob, one after another.
+      // Phase 1 — upload every selected video directly to the selected host.
       const queue = active.filter(r => !r.url.trim());
       setUploadTotal(queue.length); setUploadDone(0);
       for (let i = 0; i < queue.length; i++) {
@@ -129,6 +111,7 @@ export default function PostScheduleModal({ targetItems, existingPosts, autoStar
         setUploads(s => ({ ...s, [row.item.index]: { status: 'uploading', loaded: 0, total: size } }));
         try {
           const publicUrl = await uploadRenderFile(row.item.blob!, {
+            provider,
             filename: videoFileName(row.item),
             contentType: row.item.mime || 'video/mp4',
             signal,
@@ -181,24 +164,26 @@ export default function PostScheduleModal({ targetItems, existingPosts, autoStar
         {result.map(p => <div key={p.id} className="border border-coal-700 p-3 font-mono text-xs text-coal-200">{p.title} · {p.platform} · {p.status}{p.errorMessage && <p className="mt-1 text-amber-warn">{p.errorMessage}</p>}{p.videoUrl && <p className="mt-1 truncate text-coal-500">{p.videoUrl}</p>}</div>)}
         <button onClick={() => { onClose(); onOpenCalendar(); }} className="bg-heat px-5 py-3 font-bold text-coal-950">Zum Kalender</button>
       </div> : <div className="mt-5 grid gap-6">
-        {connected ? <div className="flex items-start gap-2 border border-volt-400/40 bg-volt-400/5 p-3 font-mono text-xs leading-relaxed text-coal-200">
-          <HardDriveUpload className="mt-0.5 size-4 shrink-0 text-volt-300" />
-          <span>Vercel Blob verbunden{envUpload
-            ? <> (serverseitig via <strong>BLOB_READ_WRITE_TOKEN</strong>)</>
-            : <> — das Read/Write-Token liegt <strong>nur in diesem Browser</strong> gespeichert (wie deine AI-Keys) und wird bei jedem Versand automatisch mitgeschickt</>} — du musst <strong>keine Links mehr eintragen</strong>: Jedes fertige Video wird automatisch hochgeladen und Buffer erhält den dauerhaften öffentlichen Link.{appToken && <> <button type="button" disabled={submitting} onClick={disconnectBlob} className="text-volt-300 underline">Verbindung trennen</button></>}</span>
-        </div> : <div className="grid gap-3 border border-amber-warn/40 bg-amber-warn/5 p-3 font-mono text-xs leading-relaxed text-coal-200">
-          <span>Vercel Blob ist noch nicht verbunden. Einmal verbinden — danach lädt jeder Versand die Videos automatisch hoch und sendet sie an Buffer:</span>
-          <div className="grid gap-2 border border-volt-400/40 bg-coal-950/40 p-3">
-            <p className="font-mono text-xs text-paper-100"><strong>Vercel Blob verbinden</strong> — einmalig; gespeichert wird nur in diesem Browser.</p>
-            <label className="font-mono text-xs text-coal-300">Read/Write-Token<input type="password" value={tokenInput} onChange={e => setTokenInput(e.target.value)} autoComplete="new-password" placeholder="vercel_blob_rw_… (Storage → Blob → .env.local)" className={inputClass} /></label>
-            <div className="flex flex-wrap items-center gap-3">
-              <button type="button" disabled={connecting} onClick={connectBlob} className="bg-heat border border-volt-400 px-4 py-2.5 font-display text-xs font-black text-coal-950 uppercase disabled:opacity-50">{connecting ? 'Prüfe …' : 'Vercel Blob verbinden'}</button>
-              <a href="https://vercel.com/docs/storage/vercel-blob" target="_blank" rel="noreferrer" className="flex items-center gap-1 font-mono text-[10px] text-volt-300"><ExternalLink className="size-3" /> Anleitung: Token anlegen (Dashboard → Storage → Blob)</a>
-            </div>
-            {connectMsg && <p role="status" className="font-mono text-[10px] text-amber-warn">{connectMsg}</p>}
-            <p className="font-mono text-[10px] text-coal-400">Alternativ serverseitig: <code>BLOB_READ_WRITE_TOKEN</code> als Server-Umgebungsvariable setzen (auf Vercel automatisch via Storage → Connect), dann neu starten/deployen — das gewinnt vor dem In-App-Token.</p>
+        <div className="grid gap-4 border border-volt-400/40 bg-volt-400/5 p-4">
+          <div className="flex items-start gap-2 font-mono text-xs leading-relaxed text-coal-200">
+            <HardDriveUpload className="mt-0.5 size-4 shrink-0 text-volt-300" />
+            <span>Buffer nimmt keine Datei-Bytes an: Der ausgewählte Provider erzeugt eine dauerhafte öffentliche HTTPS-Adresse. Das Video wird direkt dorthin übertragen, erst danach bekommt Buffer den Link. <strong>Kein Vercel Blob.</strong></span>
           </div>
-        </div>}
+          <div className="grid gap-2 sm:grid-cols-3">
+            {(['r2', 'b2', 'puter'] as UploadProvider[]).map(option => {
+              const info = host?.providers?.[option];
+              const available = Boolean(info?.configured);
+              return <button key={option} type="button" disabled={submitting || !available} onClick={() => selectProvider(option)} className={`grid gap-1 border p-3 text-left ${provider === option ? 'border-volt-400 bg-volt-400/10' : 'border-coal-700'} ${!available ? 'cursor-not-allowed opacity-45' : ''}`}>
+                <span className="flex items-center justify-between gap-2 text-sm font-bold text-paper-100"><span>{info?.label || providerLabel(option)}</span><span className="font-mono text-[9px] uppercase text-coal-400">{available ? 'bereit' : 'nicht konfiguriert'}</span></span>
+                <span className="font-mono text-[10px] leading-relaxed text-coal-400">{info?.description || 'Status wird geladen …'}</span>
+              </button>;
+            })}
+          </div>
+          {selectedProvider && <p className="font-mono text-[10px] leading-relaxed text-coal-300"><strong>{selectedProvider.label}:</strong> {selectedProvider.mode === 'browser' ? 'Beim ersten Upload öffnet Puter die Anmeldung. Die Datei bleibt in deinem Puter-Konto.' : 'Server-Umgebungsvariablen signieren nur die kurzlebige PUT-Adresse; Geheimnisse verlassen den Server nicht.'} <a href={selectedProvider.setupUrl} target="_blank" rel="noreferrer" className="ml-1 inline-flex items-center gap-1 text-volt-300 underline"><ExternalLink className="size-3" />Einrichtung</a></p>}
+          {!host && <p className="font-mono text-[10px] text-coal-400">Lade Providerstatus …</p>}
+          {host && !connected && <p className="font-mono text-xs text-amber-warn">{selectedProvider?.label || providerLabel(provider)} ist noch nicht eingerichtet. Folge der Anleitung im README oder wähle einen bereiten Provider.</p>}
+          {providerMsg && <p role="status" className="font-mono text-[10px] text-amber-warn">{providerMsg}</p>}
+        </div>
         <BufferChannels config={config} onChange={setConfig} disabled={submitting} />
         {autoStart && valid && !submitting && <div className="grid gap-2 border border-volt-400/60 bg-volt-400/10 p-4">
           <p className="font-display text-sm font-black uppercase text-paper-100">Alles bereit: {active.length} Videos · {total} Posts · Modus „{mode === 'queue' ? 'Buffer-Queue' : mode === 'now' ? 'Jetzt posten' : mode === 'auto' ? 'Auto-Plan' : 'Frei planen'}“</p>
@@ -227,14 +212,14 @@ export default function PostScheduleModal({ targetItems, existingPosts, autoStar
                   </div> : up.status === 'error' ? <p className="font-mono text-[10px] text-rose-err">{up.error}</p> : r.url ? <>
                     <p className="flex items-center gap-1 font-mono text-[10px] text-volt-300"><Check className="size-3 shrink-0" /> Bereits hochgeladen — wird wiederverwendet</p>
                     <a href={r.url} target="_blank" rel="noreferrer" className="flex items-center gap-1 truncate font-mono text-[10px] text-coal-400"><ExternalLink className="size-3 shrink-0" /> {r.url}</a>
-                  </> : !connected ? <p className="font-mono text-[10px] text-amber-warn">Erst Vercel Blob oben verbinden — danach wird dieses Video automatisch hochgeladen.</p> : <p className="font-mono text-[10px] text-coal-400">Wird beim Start automatisch hochgeladen ({r.item.size ? `${Math.round(r.item.size / 1048576)} MB` : 'Video'}).</p>}
+                  </> : !connected ? <p className="font-mono text-[10px] text-amber-warn">Erst einen Upload-Provider oben einrichten oder auswählen — danach wird dieses Video automatisch hochgeladen.</p> : <p className="font-mono text-[10px] text-coal-400">Wird beim Start zu {selectedProvider?.label || providerLabel(provider)} hochgeladen ({r.item.size ? `${Math.round(r.item.size / 1048576)} MB` : 'Video'}).</p>}
                   {r.url && !submitting && validateVideoUrl(r.url.trim()) && <p className="font-mono text-[10px] text-amber-warn">{validateVideoUrl(r.url.trim())}</p>}
                 </div>
               </div>
             </div>;
           })}
           {!rows.length && <p className="text-amber-warn">Zuerst mindestens ein Video fertig rendern.</p>}
-          <label className="flex items-start gap-2 font-mono text-xs text-coal-300"><input type="checkbox" style={{ display: 'inline-block' }} checked={consentGiven} onChange={e => ack(e.target.checked)} />Ich habe verstanden: Die Videos werden in meinen Vercel-Blob-Store hochgeladen und als echte Posts an Buffer übergeben — je nach Modus sofort veröffentlicht.</label>
+          <label className="flex items-start gap-2 font-mono text-xs text-coal-300"><input type="checkbox" style={{ display: 'inline-block' }} checked={consentGiven} onChange={e => ack(e.target.checked)} />Ich habe verstanden: Die Videos werden zu meinem ausgewählten Upload-Provider hochgeladen und als echte Posts an Buffer übergeben — je nach Modus sofort veröffentlicht.</label>
           {repeatWarnings.length > 0 && <div className="grid gap-2 border border-amber-warn/40 bg-amber-warn/5 p-3">
             <p className="font-mono text-xs text-amber-warn"><AlertTriangle className="mr-1 inline size-3.5" />Laut Journal wurden bereits Posts mit diesen Titeln versendet: {repeatWarnings.join(', ')}. Ein erneuter Versand erzeugt echte Doppelposts.</p>
             <label className="flex items-start gap-2 font-mono text-xs text-coal-300"><input type="checkbox" style={{ display: 'inline-block' }} checked={repeatAck} onChange={e => setRepeatAck(e.target.checked)} />Ich möchte diese Videos bewusst ein zweites Mal senden.</label>
@@ -266,7 +251,7 @@ export default function PostScheduleModal({ targetItems, existingPosts, autoStar
           {uploadingNow && <>
             <p>HOCHLADEN {Math.min(uploadDone + (currentUpload ? 1 : 0), uploadTotal)}/{uploadTotal} — {currentUpload ? `Video ${String(currentUpload.item.index + 1).padStart(2, '0')}` : ''}</p>
             <progress max={100} value={uploadPercent} className="w-full accent-lime-400" />
-            <p className="text-coal-400">Videos werden direkt zu Vercel Blob übertragen. Danach startet der Buffer-Versand automatisch.</p>
+            <p className="text-coal-400">Videos werden direkt zum ausgewählten Provider übertragen. Danach startet der Buffer-Versand automatisch.</p>
           </>}
           {progress && <>
             <p>{progress.message}</p>

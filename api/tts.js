@@ -33,6 +33,7 @@ export const config = {
 
 import { createHash } from "node:crypto";
 import WebSocket from "ws";
+import { requirePassword } from "../shared/auth.js";
 
 /* ------------------------------------------------------------------ */
 /*  constants — mirrors edge-tts src/edge_tts/constants.py              */
@@ -308,6 +309,7 @@ export default async function handler(req, res) {
   if (req.method !== "POST") {
     return res.status(405).json({ ok: false, error: "POST only" });
   }
+  if (!requirePassword(req, res)) return;
 
   try {
     const body =

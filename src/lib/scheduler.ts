@@ -1,4 +1,5 @@
 import { DEFAULT_DESCRIPTION, validateVideoUrl } from '../../shared/buffer.js';
+import { authHeaders } from './auth.ts';
 export { DEFAULT_DESCRIPTION, validateVideoUrl };
 export type SocialPlatform = 'tiktok' | 'instagram' | 'youtube';
 export type PostStatus = 'Geplant' | 'Wird veröffentlicht' | 'Veröffentlicht' | 'Fehler' | 'Unklar';
@@ -271,7 +272,7 @@ export async function bufferRequest<T>(body: object): Promise<T> {
   let res: Response;
   try {
     res = await fetch('/api/buffer', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+      method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeaders() }, body: JSON.stringify(body),
       signal: AbortSignal.timeout(55000),
     });
   } catch { throw new BufferRequestError('Verbindung unterbrochen. Ergebnis in Buffer prüfen; nicht blind erneut senden.', true); }
@@ -291,7 +292,7 @@ function remotePatch(post: RemotePost, fallback: string): Pick<ScheduledPost, 's
 }
 export async function fetchScheduledPosts(): Promise<{ posts: ScheduledPost[]; hasApiKey: boolean }> {
   const posts = loadLocalPosts();
-  const res = await fetch('/api/buffer');
+  const res = await fetch('/api/buffer', { headers: authHeaders(), cache: 'no-store' });
   if (!res.ok) throw new Error('Buffer-Backend nicht erreichbar.');
   const { hasApiKey } = await res.json();
   if (!hasApiKey) return { posts, hasApiKey: false };

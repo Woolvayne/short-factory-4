@@ -13,6 +13,8 @@
  * no Supabase anon key, no environment configuration needed at all.
  */
 
+import { authHeaders } from './auth.ts';
+
 const TTS_ENDPOINT = "/api/tts";
 
 export interface WordTs {
@@ -54,7 +56,7 @@ export async function synthesizeSpeech(
     const res = await fetch(TTS_ENDPOINT, {
       method: "POST",
       signal: controller.signal,
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...authHeaders() },
       body: JSON.stringify({ text, voice, rate, pitch }),
     });
 

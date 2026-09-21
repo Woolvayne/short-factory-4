@@ -765,7 +765,7 @@ export default function App() {
               { icon: Mic, k: "VOICE BENCH", v: "EDGE READ-ALOUD · WEBSOCKET" },
               { icon: Captions, k: "CAPTION JIG", v: "WORD-BOUNDARY TIMINGS" },
               { icon: Clapperboard, k: "RENDER MILL", v: "CANVAS + MEDIARECORDER" },
-              { icon: FileArchive, k: "DISPATCH", v: "JSZIP → BLOB ANCHOR" },
+              { icon: FileArchive, k: "DISPATCH", v: "ZIP LOCAL · R2 / B2 / PUTER" },
               {
                 icon: HardDrive,
                 k: "ASSET VAULT",
@@ -916,7 +916,7 @@ export default function App() {
               <Radio className="size-3.5 text-coal-500" /> NATIVE TTS WEBSOCKET
             </span>
             <span className="flex items-center gap-1.5 font-mono text-[9.5px] tracking-wider text-coal-400">
-              <Wifi className="size-3.5 text-coal-500" /> NETWORK ONLY FOR VOICE + AI
+              <Wifi className="size-3.5 text-coal-500" /> NETWORK FOR VOICE · AI · UPLOAD · BUFFER
             </span>
             <span className="hidden items-center gap-1.5 font-mono text-[9.5px] tracking-wider text-coal-400 sm:flex">
               <ShieldCheck className="size-3.5 text-coal-500" /> KEYS IN LOCALSTORAGE ONLY
