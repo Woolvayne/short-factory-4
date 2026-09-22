@@ -52,11 +52,12 @@ const b2Env = {
   B2_PUBLIC_BASE_URL: 'https://f000.backblazeb2.com/file/shorts',
 };
 
-test('GET exposes all three providers without leaking credentials', async () => {
+test('GET exposes all four providers without leaking credentials', async () => {
   const result = await request(undefined, 'GET');
   assert.equal(result.status, 200);
-  assert.equal(result.payload.configured, true); // Puter is browser-only and needs no env
-  assert.equal(result.payload.provider, 'puter');
+  assert.equal(result.payload.configured, true);
+  assert.equal(result.payload.provider, 'onlyfiles');
+  assert.equal(result.payload.providers.onlyfiles.configured, true);
   assert.equal(result.payload.providers.r2.configured, false);
   assert.equal(result.payload.providers.b2.configured, false);
   assert.equal(result.payload.providers.puter.configured, true);
@@ -65,6 +66,7 @@ test('GET exposes all three providers without leaking credentials', async () => 
 
   setEnv({ ...r2Env, ...b2Env, STORAGE_PROVIDER: 'b2' });
   const configured = await request(undefined, 'GET');
+  assert.equal(configured.payload.providers.onlyfiles.configured, true);
   assert.equal(configured.payload.providers.r2.configured, true);
   assert.equal(configured.payload.providers.b2.configured, true);
   assert.equal(configured.payload.provider, 'b2');
@@ -77,7 +79,7 @@ test('server password protects upload status and prepare routes', async () => {
   assert.equal(denied.payload.code, 'auth_required');
   const allowed = await request(undefined, 'GET', { 'x-sf-password': 'correct horse' });
   assert.equal(allowed.status, 200);
-  assert.equal((await request({ action: 'prepare', provider: 'puter', filename: 'a.mp4' }, 'POST', { 'x-sf-password': 'correct horse' })).status, 200);
+  assert.equal((await request({ action: 'prepare', provider: 'puter', filename: 'a.mp4', contentType: 'video/mp4', size: 1024 }, 'POST', { 'x-sf-password': 'correct horse' })).status, 200);
 });
 
 test('Puter preparation is credential-free and returns a unique safe path', async () => {
@@ -111,7 +113,7 @@ test('B2 preparation derives the configured S3 endpoint and public base URL', as
 });
 
 test('incomplete server providers fail closed and unsupported media is rejected', async () => {
-  await assert.rejects(() => prepareUpload({ provider: 'r2', filename: 'a.mp4', contentType: 'video/mp4', size: 1 }), /Cloudflare R2.*nicht vollständig/);
+  await assert.rejects(() => prepareUpload({ provider: 'r2', filename: 'a.mp4', contentType: 'video/mp4', size: 1 }), /Cloudflare R2.*nicht vollst/);
   setEnv(r2Env);
   await assert.rejects(() => prepareUpload({ provider: 'r2', filename: 'a.mov', contentType: 'video/quicktime', size: 1 }), /MP4- oder WebM/);
   await assert.rejects(() => prepareUpload({ provider: 'r2', filename: 'a.mp4', contentType: 'video/mp4', size: 6 * 1024 * 1024 * 1024 }), /5 GiB/);
@@ -124,9 +126,42 @@ test('provider helpers keep secrets server-side and choose a configured default'
   const key = buildObjectKey('nested\\danger name.mp4');
   assert.match(key, /^shortsfactory\/.*-danger-name\.mp4$/);
   const statuses = providerStatuses();
+  assert.equal(statuses.onlyfiles.configured, true);
   assert.equal(statuses.r2.configured, true);
   assert.equal(statuses.puter.configured, true);
   assert.ok(!JSON.stringify(statuses).includes('r2-secret'));
+});
+
+test('OnlyFiles preparation is credential-free, enforces 100 MB cap and builds probe candidates', async () => {
+  const { prepareOnlyFilesUpload, onlyFilesCandidates, verifyOnlyFilesUpload } = await import('../api/upload.js');
+  const ok = prepareOnlyFilesUpload({ filename: 'clip.mp4', contentType: 'video/mp4', size: 50_000_000 });
+  assert.equal(ok.ok, true);
+  assert.equal(ok.provider, 'onlyfiles');
+  assert.match(ok.endpoint, /^https:\/\/api\.onlyfiles\.com\//);
+  assert.equal(ok.expire, '0');
+  assert.equal(ok.maxBytes, 100_000_000);
+  assert.throws(() => prepareOnlyFilesUpload({ filename: 'big.mp4', contentType: 'video/mp4', size: 150_000_000 }), /100 MB/);
+
+  const candidates = onlyFilesCandidates('abc123', 'my video.mp4');
+  assert.equal(candidates.length, 2);
+  assert.ok(candidates[0].startsWith('https://onlyfiles.com/dl/abc123/'));
+  assert.ok(candidates[0].includes('my-video.mp4'));
+  assert.throws(() => onlyFilesCandidates('../etc', 'a.mp4'), /Datei-ID/);
+  assert.throws(() => onlyFilesCandidates('https://evil.internal', 'a.mp4'), /Datei-ID/);
+
+  const fakeFetch = async (url) => {
+    if (url.includes('/dl/')) {
+      return { ok: true, status: 200, headers: { get: (k) => k.toLowerCase() === 'content-type' ? 'video/mp4' : null }, body: { cancel() {} } };
+    }
+    return { ok: true, status: 200, headers: { get: () => 'text/html' }, body: { cancel() {} } };
+  };
+  const verified = await verifyOnlyFilesUpload({ id: 'abc123', filename: 'clip.mp4' }, fakeFetch);
+  assert.equal(verified.ok, true);
+  assert.match(verified.publicUrl, /^https:\/\/onlyfiles\.com\/dl\//);
+  assert.equal(verified.provider, 'onlyfiles');
+
+  const htmlOnly = async () => ({ ok: true, status: 200, headers: { get: () => 'text/html' }, body: { cancel() {} } });
+  await assert.rejects(() => verifyOnlyFilesUpload({ id: 'abc123', filename: 'clip.mp4' }, htmlOnly), /keine Adresse liefert das Video direkt/);
 });
 
 test('route hygiene and public URL validation remain strict', async () => {
@@ -136,4 +171,6 @@ test('route hygiene and public URL validation remain strict', async () => {
   assert.equal((await request({ action: 'nope' })).status, 400);
   assert.equal(validateVideoUrl('https://media.example.com/shortsfactory/clip.mp4'), '');
   assert.equal(validateVideoUrl('https://f000.backblazeb2.com/file/shorts/shortsfactory/clip.webm'), '');
+  assert.equal(validateVideoUrl('https://onlyfiles.com/dl/abc123/clip.mp4'), '');
+  assert.equal(validateVideoUrl('https://onlyfiles.com/abc123/clip.mp4'), '');
 });
