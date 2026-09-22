@@ -21,7 +21,7 @@ Optimised for desktop **and** iPhone / iPad (iOS 17+ recommended).
 4. **Alle posten — ein Klick** — the big **ALLE N VIDEOS AUF EINMAL POSTEN**
    button in the Output Bay opens the dispatch window with everything
    preselected. One confirmation press: every finished video is uploaded to
-   your selected OnlyFiles, R2, B2 or Puter host and then handed to Buffer
+   OnlyFiles (anonym, no account needed) and then handed to Buffer
    **one after another with a short pause**, so all ten reliably go through.
 
 ## Clip Mill — one source → ten clips
@@ -95,51 +95,42 @@ Buffer akzeptiert **keine direkten Datei-Uploads per API**. Es gibt keinen
 `Buffer`-Endpoint, an den die App einen Node- oder Browser-`Buffer` senden kann.
 Stattdessen muss Buffer eine **direkte, öffentliche, dauerhafte HTTPS-Datei-URL**
 bekommen. Die App lädt deshalb jedes fertige Video vor dem Versand direkt zu
-einem von vier auswählbaren Hosts hoch und übergibt erst danach die URL an
-Buffer. Das vermeidet den Vercel-Blob-Engpass; Vercel bekommt dabei keine
-Videobytes.
+**OnlyFiles** hoch (anonym, ohne Konto, ohne Key, ohne Bucket) und übergibt erst
+danach die URL an Buffer. Das vermeidet den Vercel-Blob-Engpass; Vercel bekommt
+dabei keine Videobytes.
 
-Die vier Adapter sind im Versandfenster auswählbar — **OnlyFiles ist der Default
-und erfüllt alle vier Kriterien: kostenlos, unbegrenzt viele Dateien, kein Konto,
-nichts einrichten**:
+**Es gibt genau einen Versandweg** — absichtlich, denn er erfüllt alle vier
+Kriterien: kostenlos, unbegrenzt viele Dateien (innerhalb der großzügigen
+Quotas), kein Konto, nichts einrichten:
 
-| Provider | Einschätzung für mindestens 100 GB/Monat | Einrichtung |
-| --- | --- | --- |
-| **OnlyFiles** (Default) | Anonym, ohne Konto/Key/Bucket: 100 MB pro Datei, 500 Dateien / 50 GB pro Stunde und 5.000 / 100 GB pro Tag — insgesamt unbegrenzt viele Dateien, solange man in den Quotas bleibt. `expire=0` hält die Datei dauerhaft. API ist CORS-enabled. | Keine. `npm run dev` reicht. |
-| **Cloudflare R2** (Empfehlung für >100 MB) | Bucket-Speicher ist laut Limits unbegrenzt, Egress ins Internet kostenlos. Es gibt keinen 100-GB-Transferdeckel; Storage und Requests werden verbrauchsabhängig berechnet. | Server-Env + öffentlicher Custom-Domain-Bucket |
-| **Backblaze B2** | S3-kompatibel, `3×` des durchschnittlich gespeicherten Volumens Egress pro Monat kostenlos, darüber `0,01 USD/GB` (oder CDN-Partner nutzen). Bei z. B. 100 GB gespeichert sind 300 GB/Monat abgedeckt. | Server-Env + öffentlicher Bucket/CDN |
-| **Puter.js** (dein „Putter“) | Browser-Upload ohne Server-Key; Puter bewirbt kostenlosen/unbegrenzten Object Storage und ein User-Pays-Modell. Die Nutzungsseite nennt aber monatliche Freikontingente/Upgrades und keine harte 100-GB-SLA. Daher bequem, aber nicht meine belastbare Produktionsgarantie für 100 GB. | Kein Env-Key; beim ersten Upload Puter anmelden |
+- **OnlyFiles** — 100 MB pro Datei, 500 Dateien / 50 GB pro Stunde und
+  5.000 Dateien / 100 GB pro Tag. `expire=0` hält die Datei dauerhaft.
+  Die API ist CORS-enabled, der Browser lädt direkt hinauf.
+  Einrichtung: **keine.** `npm run dev` reicht.
 
-**Meine Empfehlung:** **OnlyFiles** für sofort loslegen ohne Konto/Setup (100 MB Cap —
-in Settings → VIDEO 720p med/low wählen, dann liegen die Shorts drunter). Für
->100 MB oder dauerhafte Produktion R2 als Standard, B2 als preiswerte Ausweich-
-oder Archivoption, Puter für einen einzelnen Operator, der keine S3-Credentials
-verwalten möchte. Kein Provider kann Buffer-Posts retten, wenn die Datei später
-gelöscht wird: Die öffentliche URL muss bis zur Veröffentlichung bestehen bleiben.
+**Kein Host kann Buffer-Posts retten, wenn die Datei später gelöscht wird:**
+Die öffentliche URL muss bis zur Veröffentlichung bestehen bleiben — genau
+deshalb uploadet die App mit `expire=0` (Dauer-Link) statt dem 24-h-Default.
 
-Weitere Details, Variablen und CORS-Beispiele stehen in
-[`docs/storage-providers.md`](docs/storage-providers.md). Kurz gesagt:
+Weitere Details stehen in [`docs/storage-providers.md`](docs/storage-providers.md).
+Kurz gesagt:
 
-1. **OnlyFiles:** Nichts einrichten. Versandfenster öffnen, **OnlyFiles** steht
-   auf `bereit`. Der Browser lädt direkt zu `https://api.onlyfiles.com/v1/upload`
-   (CORS `*`), `expire=0` = Dauer-Link. Der Server prüft danach, ob
-   `/dl/{id}/{name}` oder `/{id}/{name}` wirklich das Video liefert — nur diese
-   geprüfte URL bekommt Buffer.
-2. R2 oder B2 als **public-read Bucket bzw. öffentliche Custom Domain**
-   einrichten; für Browser-PUT zusätzlich CORS für die App-Origin erlauben.
-3. Die Provider-Variablen aus `.env.example` in `.env.local` bzw. in Vercel
-   eintragen. Geheimnisse nie mit `VITE_` prefixen.
-4. Neu starten bzw. redeployen, Versandfenster öffnen und den Provider-Card
-   auswählen. Puter lädt bei der ersten Verwendung `https://js.puter.com/v2/`
-   und startet den Login.
-5. Die erzeugte URL in einem privaten Browserfenster öffnen. Sie muss das
+1. Nichts einrichten. Versandfenster öffnen — **OnlyFiles** steht auf `bereit`.
+   Der Browser lädt direkt zu `https://api.onlyfiles.com/v1/upload` (CORS `*`),
+   `expire=0` = Dauer-Link.
+2. Danach **verifiziert der Browser selbst**, dass eine der zurückgegebenen
+   Adressen (`/dl/{id}/{name}`, `url.full`, `url.short`) das Video wirklich
+   direkt ausliefert: Byte-Range-Fetch plus echte `<video>`-Dekodierung —
+   exakt so, wie Buffer die Datei später liest. Nur eine bestätigte Adresse
+   geht an Buffer. Der frühere serverseitige Probe (der vom Bot-Schutz der
+   Host-Domain immer wieder mit HTML-Vorschauseiten beantwortet wurde und
+   dadurch gesunde Uploads blockierte) ist entfallen.
+3. Die erzeugte URL in einem privaten Browserfenster öffnen. Sie muss das
    MP4/WebM direkt ohne Login, Preview-Seite oder ablaufende Signatur liefern.
 
-R2/B2 nutzen eine **15 Minuten gültige Presigned-PUT-URL nur für den Upload**;
-diese URL wird niemals an Buffer gesendet. Buffer erhält anschließend die
-stabile `R2_PUBLIC_BASE_URL` bzw. `B2_PUBLIC_BASE_URL`. Puter liefert seine
-öffentliche `getReadURL`-Adresse direkt aus dem Browser. OnlyFiles liefert
-`/dl/{id}/{name}` als Direkt-Adresse nach Server-Verifizierung.
+Die Upload-Endpoint-Konfiguration (Endpoint, 100-MB-Cap, Dateiname-Säuberung)
+liegt serverseitig hinter dem Passwort-Gate (`/api/upload`); Geheimnisse oder
+Videobytes berührt sie nicht.
 
 ### Passwortschutz
 
@@ -160,8 +151,8 @@ und die S3-Schlüssel bleiben trotzdem ausschließlich Server-Variablen.
 vorausgewählt: alle fertigen Videos markiert, Kanäle, Beschreibung und Modus
 aus der letzten Einrichtung übernommen. Ein Startdruck führt dann aus:
 
-1. **Upload-Phase** — jedes ausgewählte Video wird nacheinander zum ausgewählten
-   OnlyFiles-, R2-, B2- oder Puter-Host übertragen (Fortschrittsbalken je Video).
+1. **Upload-Phase** — jedes ausgewählte Video wird nacheinander zu OnlyFiles
+   übertragen (Fortschrittsbalken je Video).
    Schlägt ein Upload fehl oder wird abgebrochen, wurde **noch nichts an Buffer gesendet**.
 2. **Versand-Phase** — die Posts gehen wie gewohnt **sequenziell mit kurzer
    Pause** (Standard 3 Sekunden nach jeder Buffer-Antwort, einstellbar
@@ -172,16 +163,17 @@ Bereits hochgeladene Videos werden wiederverwendet (kein Doppel-Upload);
 pro Video gibt es „Erneut hochladen“, um bewusst einen neuen Link zu erzeugen.
 Sendet das Journal bereits nicht fehlgeschlagene Posts mit denselben Titeln,
 verlangt das Fenster eine zusätzliche Bestätigung gegen versehentliche
-Doppelposts. Ohne eingerichteten Provider zeigt das Fenster die fehlende Einrichtung an —
-ein manuelles Eintragen von Links ist nicht nötig.
+Doppelposts. Ist das Upload-Backend nicht erreichbar, zeigt das Fenster einen klaren
+Hinweis an — ein manuelles Eintragen von Links ist nicht nötig.
 
 Jedes ausgewählte Video wird **genau einmal pro ausgewähltem Kanal** gesendet,
 keine Rotation und kein Auffüllen eines einzelnen Videos auf zehn Posts.
 Buffer bzw. die jeweilige Plattform prüft Medienformat/-größe/-dauer; MP4 mit
 H.264/AAC ist zu bevorzugen. Der lokale Renderer verwendet MP4, wenn der Browser
-es unterstützt, andernfalls WebM — beides lädt die App direkt zum gewählten
-Provider hoch. Die App prüft die gelieferten Upload-Adressen, garantiert aber keine
-externe Erreichbarkeit oder plattformübergreifende Medienkompatibilität.
+es unterstützt, andernfalls WebM — beides lädt die App direkt zu OnlyFiles hoch.
+Die App verifiziert im Browser, dass die Adresse das Video direkt ausliefert,
+garantiert aber keine externe Erreichbarkeit oder plattformübergreifende
+Medienkompatibilität.
 
 | Modus | Verhalten |
 | --- | --- |
@@ -253,10 +245,7 @@ gewählte Animation enthalten. Kein Referenz-Anhang lag bei der Umsetzung vor.
 - [ShareMode](https://developers.buffer.com/types/ShareMode.html)
 - [YouTube-Metadaten](https://developers.buffer.com/types/YoutubePostMetadataInput.html)
 - [Instagram-Metadaten](https://developers.buffer.com/types/InstagramPostMetadataInput.html)
-- [Cloudflare R2 Limits](https://developers.cloudflare.com/r2/platform/limits/) · [Pricing](https://developers.cloudflare.com/r2/pricing/)
-- [Backblaze B2 Pricing](https://www.backblaze.com/cloud-storage/pricing) · [S3-compatible API](https://www.backblaze.com/docs/cloud-storage-s3-compatible-api)
 - [OnlyFiles API](https://onlyfiles.com/api) — free anonymous, CORS `*`, `expire=0` = forever
-- [Puter Cloud Storage](https://docs.puter.com/FS/) · [User-Pays Model](https://docs.puter.com/user-pays-model/)
 - [Storage setup guide](docs/storage-providers.md)
 
 ## Lokaler Asset-Speicher
@@ -313,8 +302,8 @@ Same origin → no CORS, no apikey, no Supabase anon key, no configuration.
 | Captions | WordBoundary timestamps grouped into N-word cues, drawn on canvas |
 | Rendering | Canvas 2D + WebAudio graph + MediaRecorder, real-time capture, MP4/H.264 on Safari with automatic WebM fallback |
 | ZIP | JSZip (STORE) → blob anchor, fully local |
-| Your files | Sources and renders stay local; finished renders go straight from the browser into the selected OnlyFiles, R2, B2 or Puter host |
-| Upload host | Browser → `/api/upload` (server-signed S3 PUT for R2/B2, Puter.js, or OnlyFiles anonymous API) → provider; permanent public URL comes back for Buffer |
+| Your files | Sources and renders stay local; finished renders go straight from the browser into the anonymous OnlyFiles host |
+| Upload host | Browser → `/api/upload` (endpoint + caps behind the password gate) → anonymous OnlyFiles API; browser-verified permanent public URL goes to Buffer |
 | Buffer | Browser → `/api/buffer` → `https://api.buffer.com` GraphQL; key stays server-side |
 
 Rendering is real-time: a 40-second voice takes ~40 seconds per unit, and the
@@ -337,10 +326,10 @@ src/
 └─ lib/
    ├─ settings.ts   llm.ts   tts.ts   renderer.ts   clips.ts   media.ts   types.ts
 
-api/        ← auth, TTS, Buffer relay + provider presign (Vercel Node.js Functions)
+api/        ← auth, TTS, Buffer relay + OnlyFiles upload config (Vercel Node.js Functions)
 shared/     ← public URL validation + Buffer payload building
 server/     ← same-origin API middleware for local Vite development
-tests/      ← Buffer relay, dispatch, scheduling, provider presign and intro regression tests
+tests/      ← Buffer relay, dispatch, scheduling, upload verification and intro regression tests
 supabase/   ← inert legacy v1 (hosted Edge Functions + Shotstack), unused
 ```
 

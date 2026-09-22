@@ -443,3 +443,76 @@ input[type="checkbox"] {
   flex-shrink: 0;
   accent-color: #d9ff3f;
 }
+
+/* ================================================================
+   Touch & iPad ergonomics
+   ================================================================ */
+
+html {
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+
+body {
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* Kill the legacy double-tap-zoom delay on controls — taps feel instant. */
+button,
+a,
+label,
+[role="button"] {
+  touch-action: manipulation;
+}
+
+/* The floating header capsule stays reachable while scrolling. */
+body > #root > div > header {
+  position: sticky;
+  top: 0;
+  z-index: 40;
+  padding-left: env(safe-area-inset-left);
+  padding-right: env(safe-area-inset-right);
+}
+
+/* Safe-area aware gutters (iPad homescreen landscape). */
+body > #root > div > main {
+  padding-left: max(1rem, env(safe-area-inset-left));
+  padding-right: max(1rem, env(safe-area-inset-right));
+}
+
+/* Overlays scroll their own content without dragging the page behind them. */
+div[role="dialog"] {
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+}
+
+/* iOS zooms into any focused field below 16px — keep coarse pointers calm.
+   The typecheck-visible layout stays intact because only the font scales. */
+@media (pointer: coarse) {
+  input:not([type="range"]):not([type="checkbox"]):not([type="radio"]):not([type="file"]),
+  textarea,
+  select {
+    font-size: 16px !important;
+    line-height: 1.4 !important;
+    padding-top: 0.65rem !important;
+    padding-bottom: 0.65rem !important;
+  }
+
+  /* Icon-only buttons stay comfortably tappable. */
+  button[class*="p-1"]:not([class*="p-1."]) {
+    min-width: 40px;
+    min-height: 40px;
+  }
+}
+
+@media (hover: none) {
+  button:not(:disabled):hover,
+  a[class*="border"]:hover {
+    transform: none;
+  }
+}
+
+/* Gentle momentum-friendly scrollbars inside overlay panels. */
+@media (pointer: coarse) {
+  ::-webkit-scrollbar { width: 6px; height: 6px; }
+}

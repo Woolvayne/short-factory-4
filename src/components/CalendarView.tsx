@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
   Calendar as CalendarIcon,
@@ -71,6 +71,8 @@ const STATUS_STYLES: Record<PostStatus, { label: string; style: string }> = {
 
 type ViewMode = "month" | "week" | "day";
 
+const WEEKDAYS_DE = ["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"] as const;
+
 function getBerlinDateStr(date: Date): string {
   const p = getBerlinParts(date);
   const pad = (n: number) => String(n).padStart(2, "0");
@@ -96,6 +98,22 @@ export default function CalendarView({
   const [actionError, setActionError] = useState("");
   const [refreshing, setRefreshing] = useState(false);
   const [connection, setConnection] = useState<boolean | null>(null);
+
+  /* Swipe navigation — flick left/right to move the calendar window (iPad). */
+  const touchStartRef = useRef<{ x: number; y: number } | null>(null);
+  const onTouchStart = (e: React.TouchEvent) => {
+    const t = e.touches[0];
+    touchStartRef.current = { x: t.clientX, y: t.clientY };
+  };
+  const onTouchEnd = (e: React.TouchEvent) => {
+    const start = touchStartRef.current;
+    touchStartRef.current = null;
+    if (!start) return;
+    const t = e.changedTouches[0];
+    const dx = t.clientX - start.x;
+    const dy = t.clientY - start.y;
+    if (Math.abs(dx) >= 56 && Math.abs(dx) > Math.abs(dy) * 1.6) shiftCursor(dx < 0 ? 1 : -1);
+  };
   async function refresh() {
     setRefreshing(true); setActionError("");
     try { const data = await fetchScheduledPosts(); onPostsChange(data.posts); setConnection(data.hasApiKey); }
@@ -341,7 +359,7 @@ export default function CalendarView({
           ].map((card) => (
             <div
               key={card.label}
-              className="border border-coal-700/80 bg-coal-850/80 p-3 text-left"
+              className="rounded-xl border border-coal-700/80 bg-coal-850/80 p-3 text-left transition-colors hover:border-coal-600"
             >
               <span className="mono-label block text-[8.5px] text-coal-400">{card.label}</span>
               <span className={cn("mt-1 block font-display text-2xl font-black", card.tone)}>
@@ -362,25 +380,25 @@ export default function CalendarView({
             <button
               type="button"
               onClick={() => shiftCursor(-1)}
-              className="border border-coal-600 p-2 text-coal-300 hover:border-volt-400 hover:text-volt-300"
+              className="grid size-11 place-items-center border border-coal-600 text-coal-300 transition-colors hover:border-volt-400 hover:text-volt-300"
               aria-label="Zurück"
             >
-              <ChevronLeft className="size-4" />
+              <ChevronLeft className="size-5" />
             </button>
             <button
               type="button"
               onClick={jumpToToday}
-              className="border border-coal-600 px-3 py-1.5 font-mono text-[10px] font-bold tracking-widest text-coal-200 hover:border-volt-400"
+              className="border border-coal-600 px-4 py-2.5 font-mono text-[10px] font-bold tracking-widest text-coal-200 transition-colors hover:border-volt-400 hover:text-volt-300"
             >
               HEUTE
             </button>
             <button
               type="button"
               onClick={() => shiftCursor(1)}
-              className="border border-coal-600 p-2 text-coal-300 hover:border-volt-400 hover:text-volt-300"
+              className="grid size-11 place-items-center border border-coal-600 text-coal-300 transition-colors hover:border-volt-400 hover:text-volt-300"
               aria-label="Weiter"
             >
-              <ChevronRight className="size-4" />
+              <ChevronRight className="size-5" />
             </button>
             <h3 className="ml-2 font-display text-base font-black uppercase text-paper-100">
               {headerTitle}
@@ -400,7 +418,7 @@ export default function CalendarView({
                 type="button"
                 onClick={() => setViewMode(mode)}
                 className={cn(
-                  "border px-3 py-1.5 font-mono text-[10px] font-bold tracking-widest transition-colors",
+                  "border px-3.5 py-2.5 font-mono text-[10px] font-bold tracking-widest transition-colors",
                   viewMode === mode
                     ? "bg-heat border-volt-400 text-coal-950"
                     : "border-coal-700 bg-coal-850 text-coal-300 hover:border-coal-500"
@@ -412,10 +430,24 @@ export default function CalendarView({
           </div>
         </div>
 
+        {/* Weekday header (month grid) */}
+        {viewMode === "month" && (
+          <div className="mt-4 hidden gap-3 border-b border-coal-700/60 pb-2 sm:grid sm:grid-cols-7">
+            {WEEKDAYS_DE.map((day) => (
+              <span key={day} className="mono-label text-center text-[8.5px] text-coal-400">
+                {day}
+              </span>
+            ))}
+          </div>
+        )}
+
         {/* Calendar Grid */}
         <div
+          onTouchStart={onTouchStart}
+          onTouchEnd={onTouchEnd}
           className={cn(
-            "mt-4 grid gap-3",
+            "grid gap-3",
+            viewMode === "month" ? "mt-4 sm:mt-3" : "mt-4",
             viewMode === "month"
               ? "grid-cols-1 sm:grid-cols-7"
               : viewMode === "week"
@@ -459,10 +491,10 @@ export default function CalendarView({
               <div
                 key={dayStr}
                 className={cn(
-                  "flex min-h-[170px] flex-col justify-between border p-3 transition-colors",
+                  "flex min-h-[170px] flex-col justify-between rounded-xl border p-3 transition-colors",
                   isToday
                     ? "border-volt-400/70 bg-coal-850/90"
-                    : "border-coal-700/80 bg-coal-850/40"
+                    : "border-coal-700/80 bg-coal-850/40 hover:border-coal-600"
                 )}
               >
                 <div>
@@ -548,7 +580,7 @@ export default function CalendarView({
                 </div>
 
                 {/* Slot Availability Footer for 06:00 & 20:00 */}
-                <div className="mt-3 flex items-center justify-between border-t border-coal-700/50 pt-2 font-mono text-[8.5px]">
+                <div className="mt-3 flex items-center justify-between border-t border-coal-700/50 pt-2 font-mono text-[9.5px]">
                   <span className={has06 ? "text-coal-500" : "text-mint-400"}>
                     06:00 {has06 ? "● Belegt" : "○ Frei"}
                   </span>
