@@ -1,12 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { AlertTriangle, Check, ExternalLink, HardDriveUpload, Loader2, Send, X } from 'lucide-react';
+import { AlertTriangle, Check, CloudUpload, ExternalLink, HardDriveUpload, Loader2, Send, X } from 'lucide-react';
 import type { LocalRenderItem } from '../lib/types';
 import { DEFAULT_DESCRIPTION, formatBerlinDateTime, loadBufferConfig, planSlots, saveBufferConfig, scheduleBatchPosts, validateVideoUrl, type DispatchProgress, type ScheduledPost, type ScheduleMode } from '../lib/scheduler';
-import { fetchUploadStatus, loadUploadProvider, providerHint, providerLabel, saveUploadProvider, uploadRenderFile, type UploadHostStatus, type UploadProvider } from '../lib/uploader';
+import { fetchUploadStatus, uploadRenderFile, type UploadHostStatus } from '../lib/uploader';
 import { videoFileName } from './MissionControl';
 import BufferChannels from './BufferChannels';
 
-const inputClass = 'w-full border border-coal-600 bg-coal-850 px-3 py-2 font-mono text-xs text-paper-100 focus:border-volt-400 focus:outline-none disabled:opacity-50';
+const inputClass = 'w-full border border-coal-600 bg-coal-850 px-3 py-2.5 font-mono text-base text-paper-100 focus:border-volt-400 focus:outline-none disabled:opacity-50 sm:text-xs';
 /** Upload-consent is remembered: the second batch onward is a single button press. */
 const UPLOAD_CONSENT_KEY = 'shortsfactory.buffer_upload_consent.v1';
 const readUploadConsent = () => { try { return localStorage.getItem(UPLOAD_CONSENT_KEY) === '1'; } catch { return false; } };
@@ -26,8 +26,6 @@ export default function PostScheduleModal({ targetItems, existingPosts, autoStar
   const [dayStep, setDayStep] = useState(1);
   const [rows, setRows] = useState(() => targetItems.filter(i => i.status === 'done').map(item => ({ item, selected: true, url: item.publicUrl ?? '', title: item.idea })));
   const [host, setHost] = useState<UploadHostStatus | null>(null);
-  const [provider, setProvider] = useState<UploadProvider>(loadUploadProvider);
-  const [providerMsg, setProviderMsg] = useState('');
   const [uploads, setUploads] = useState<Record<number, UploadState>>({});
   const [uploadDone, setUploadDone] = useState(0);
   const [uploadTotal, setUploadTotal] = useState(0);
@@ -42,8 +40,7 @@ export default function PostScheduleModal({ targetItems, existingPosts, autoStar
   const plan = { mode, count: active.length, times: times.split(/[,\s]+/).filter(Boolean), startDate, dayStep };
   const slots = planSlots(existingPosts, plan);
   const total = active.length * config.defaultPlatforms.length;
-  const selectedProvider = host?.providers?.[provider];
-  const connected = Boolean(selectedProvider?.configured);
+  const connected = Boolean(host?.configured);
   const repeatWarnings = useMemo(() => connected
     ? active.filter(r => existingPosts.some(p => p.title === r.title && p.status !== 'Fehler')).map(r => `Video ${String(r.item.index + 1).padStart(2, '0')}`)
     : [], [connected, active, existingPosts]);
@@ -54,13 +51,7 @@ export default function PostScheduleModal({ targetItems, existingPosts, autoStar
 
   useEffect(() => {
     const controller = new AbortController();
-    fetchUploadStatus(controller.signal).then(status => {
-      setHost(status);
-      const saved = loadUploadProvider();
-      if (status.providers[saved]?.configured) setProvider(saved);
-      else if (status.providers[status.provider]?.configured) setProvider(status.provider);
-      else setProvider('onlyfiles');
-    }).catch(() => setHost(null));
+    fetchUploadStatus(controller.signal).then(setHost).catch(() => setHost(null));
     return () => controller.abort();
   }, []);
   useEffect(() => {
@@ -84,12 +75,6 @@ export default function PostScheduleModal({ targetItems, existingPosts, autoStar
     return uploads[index] ?? { status: 'pending', loaded: 0, total: 0 };
   }
 
-  function selectProvider(next: UploadProvider) {
-    setProvider(next);
-    saveUploadProvider(next);
-    setProviderMsg('');
-  }
-
   async function send() {
     if (submitting || !valid) return;
     setError('');
@@ -111,7 +96,6 @@ export default function PostScheduleModal({ targetItems, existingPosts, autoStar
         setUploads(s => ({ ...s, [row.item.index]: { status: 'uploading', loaded: 0, total: size } }));
         try {
           const publicUrl = await uploadRenderFile(row.item.blob!, {
-            provider,
             filename: videoFileName(row.item),
             contentType: row.item.mime || 'video/mp4',
             signal,
@@ -167,22 +151,31 @@ export default function PostScheduleModal({ targetItems, existingPosts, autoStar
         <div className="grid gap-4 border border-volt-400/40 bg-volt-400/5 p-4">
           <div className="flex items-start gap-2 font-mono text-xs leading-relaxed text-coal-200">
             <HardDriveUpload className="mt-0.5 size-4 shrink-0 text-volt-300" />
-            <span>Buffer nimmt keine Datei-Bytes an: Der ausgewählte Provider erzeugt eine dauerhafte öffentliche HTTPS-Adresse. Das Video wird direkt dorthin übertragen, erst danach bekommt Buffer den Link. <strong>Kein Vercel Blob.</strong></span>
+            <span>Buffer nimmt keine Datei-Bytes an: Das Video wird direkt zu <strong>OnlyFiles</strong> übertragen und erhält dort eine dauerhafte öffentliche HTTPS-Adresse. Erst die geprüfte Adresse geht an Buffer. <strong>Kein Vercel Blob.</strong></span>
           </div>
-          <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
-            {(['onlyfiles', 'r2', 'b2', 'puter'] as UploadProvider[]).map(option => {
-              const info = host?.providers?.[option];
-              const available = Boolean(info?.configured);
-              return <button key={option} type="button" disabled={submitting || !available} onClick={() => selectProvider(option)} className={`grid gap-1 border p-3 text-left ${provider === option ? 'border-volt-400 bg-volt-400/10' : 'border-coal-700'} ${!available ? 'cursor-not-allowed opacity-45' : ''}`}>
-                <span className="flex items-center justify-between gap-2 text-sm font-bold text-paper-100"><span>{info?.label || providerLabel(option)}</span><span className="font-mono text-[9px] uppercase text-coal-400">{available ? 'bereit' : 'nicht konfiguriert'}</span></span>
-                <span className="font-mono text-[10px] leading-relaxed text-coal-400">{info?.description || 'Status wird geladen …'}</span>
-              </button>;
-            })}
+          <div className="flex flex-wrap items-center gap-3 border border-coal-700 bg-coal-900/80 p-4">
+            <span className="bg-heat grid size-11 shrink-0 place-items-center rounded-xl text-coal-950">
+              <CloudUpload className="size-5" strokeWidth={2.2} />
+            </span>
+            <div className="min-w-0 flex-1">
+              <p className="flex flex-wrap items-center gap-2 font-display text-sm font-black uppercase text-paper-100">
+                {host?.label || 'OnlyFiles'}
+                <span className={connected
+                  ? 'border border-volt-400/50 bg-volt-400/10 px-2 py-0.5 font-mono text-[9px] font-bold tracking-widest text-volt-300'
+                  : 'border border-amber-warn/50 bg-amber-warn/10 px-2 py-0.5 font-mono text-[9px] font-bold tracking-widest text-amber-warn'}>
+                  {connected ? 'BEREIT' : !host ? 'PRÜFE …' : 'BACKEND NICHT ERREICHBAR'}
+                </span>
+              </p>
+              <p className="mt-1 font-mono text-[10px] leading-relaxed text-coal-400">
+                Anonym & ohne Konto · Dauer-Link{host ? ` · max. ${Math.round(host.maxBytes / 1_000_000)} MB pro Datei` : ''} · nach dem Upload wird geprüft, ob die Adresse das Video direkt ausliefert — erst dann geht sie an Buffer.
+              </p>
+            </div>
+            <a href="https://onlyfiles.com/api" target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 border border-coal-600 px-3 py-2 font-mono text-[10px] text-volt-300 transition-colors hover:border-volt-400">
+              <ExternalLink className="size-3" /> API-Details
+            </a>
           </div>
-          {selectedProvider && <p className="font-mono text-[10px] leading-relaxed text-coal-300"><strong>{selectedProvider.label}:</strong> {providerHint(selectedProvider.provider)} <a href={selectedProvider.setupUrl} target="_blank" rel="noreferrer" className="ml-1 inline-flex items-center gap-1 text-volt-300 underline"><ExternalLink className="size-3" />Einrichtung</a></p>}
-          {!host && <p className="font-mono text-[10px] text-coal-400">Lade Providerstatus …</p>}
-          {host && !connected && <p className="font-mono text-xs text-amber-warn">{selectedProvider?.label || providerLabel(provider)} ist noch nicht eingerichtet. Folge der Anleitung im README oder wähle einen bereiten Provider.</p>}
-          {providerMsg && <p role="status" className="font-mono text-[10px] text-amber-warn">{providerMsg}</p>}
+          {!host && <p className="font-mono text-[10px] text-coal-400">Lade Upload-Status …</p>}
+          {host && !connected && <p className="font-mono text-xs text-amber-warn">Das Upload-Backend ist nicht erreichbar. Seite neu laden oder Server-Setup prüfen (README).</p>}
         </div>
         <BufferChannels config={config} onChange={setConfig} disabled={submitting} />
         {autoStart && valid && !submitting && <div className="grid gap-2 border border-volt-400/60 bg-volt-400/10 p-4">
@@ -199,7 +192,7 @@ export default function PostScheduleModal({ targetItems, existingPosts, autoStar
             return <div key={r.item.index} className="grid gap-3 border border-coal-700 p-3 sm:grid-cols-[72px_1fr]">
               <div>{r.item.blobUrl && <video src={r.item.blobUrl} muted playsInline controls preload="metadata" className="w-full max-w-20 bg-black" style={{ aspectRatio: '9 / 16' }} />}</div>
               <div className="grid gap-2">
-                <label className="flex items-center gap-2 font-mono text-xs text-paper-100"><input type="checkbox" style={{ display: 'inline-block' }} checked={r.selected} onChange={e => setRows(rows.map((row, j) => j === i ? { ...row, selected: e.target.checked } : row))} />Video {String(r.item.index + 1).padStart(2, '0')}</label>
+                <label className="flex items-center gap-2 font-mono text-xs text-paper-100"><input type="checkbox" className="size-4 shrink-0 accent-orange-500" style={{ display: 'inline-block' }} checked={r.selected} onChange={e => setRows(rows.map((row, j) => j === i ? { ...row, selected: e.target.checked } : row))} />Video {String(r.item.index + 1).padStart(2, '0')}</label>
                 <input aria-label={`Titel Video ${i + 1}`} value={r.title} onChange={e => setRows(rows.map((row, j) => j === i ? { ...row, title: e.target.value } : row))} className={inputClass} />
                 <div className="grid gap-1">
                   {up.status === 'done' && r.url ? <>
@@ -212,17 +205,17 @@ export default function PostScheduleModal({ targetItems, existingPosts, autoStar
                   </div> : up.status === 'error' ? <p className="font-mono text-[10px] text-rose-err">{up.error}</p> : r.url ? <>
                     <p className="flex items-center gap-1 font-mono text-[10px] text-volt-300"><Check className="size-3 shrink-0" /> Bereits hochgeladen — wird wiederverwendet</p>
                     <a href={r.url} target="_blank" rel="noreferrer" className="flex items-center gap-1 truncate font-mono text-[10px] text-coal-400"><ExternalLink className="size-3 shrink-0" /> {r.url}</a>
-                  </> : !connected ? <p className="font-mono text-[10px] text-amber-warn">Erst einen Upload-Provider oben einrichten oder auswählen — danach wird dieses Video automatisch hochgeladen.</p> : <p className="font-mono text-[10px] text-coal-400">Wird beim Start zu {selectedProvider?.label || providerLabel(provider)} hochgeladen ({r.item.size ? `${Math.round(r.item.size / 1048576)} MB` : 'Video'}).</p>}
+                  </> : !connected ? <p className="font-mono text-[10px] text-amber-warn">Warte auf das Upload-Backend — danach wird dieses Video automatisch hochgeladen.</p> : <p className="font-mono text-[10px] text-coal-400">Wird beim Start zu OnlyFiles hochgeladen ({r.item.size ? `${Math.round(r.item.size / 1048576)} MB` : 'Video'}).</p>}
                   {r.url && !submitting && validateVideoUrl(r.url.trim()) && <p className="font-mono text-[10px] text-amber-warn">{validateVideoUrl(r.url.trim())}</p>}
                 </div>
               </div>
             </div>;
           })}
           {!rows.length && <p className="text-amber-warn">Zuerst mindestens ein Video fertig rendern.</p>}
-          <label className="flex items-start gap-2 font-mono text-xs text-coal-300"><input type="checkbox" style={{ display: 'inline-block' }} checked={consentGiven} onChange={e => ack(e.target.checked)} />Ich habe verstanden: Die Videos werden zu meinem ausgewählten Upload-Provider hochgeladen und als echte Posts an Buffer übergeben — je nach Modus sofort veröffentlicht.</label>
+          <label className="flex items-start gap-2 font-mono text-xs text-coal-300"><input type="checkbox" className="size-4 shrink-0 accent-orange-500" style={{ display: 'inline-block' }} checked={consentGiven} onChange={e => ack(e.target.checked)} />Ich habe verstanden: Die Videos werden anonym zu OnlyFiles hochgeladen und als echte Posts an Buffer übergeben — je nach Modus sofort veröffentlicht.</label>
           {repeatWarnings.length > 0 && <div className="grid gap-2 border border-amber-warn/40 bg-amber-warn/5 p-3">
             <p className="font-mono text-xs text-amber-warn"><AlertTriangle className="mr-1 inline size-3.5" />Laut Journal wurden bereits Posts mit diesen Titeln versendet: {repeatWarnings.join(', ')}. Ein erneuter Versand erzeugt echte Doppelposts.</p>
-            <label className="flex items-start gap-2 font-mono text-xs text-coal-300"><input type="checkbox" style={{ display: 'inline-block' }} checked={repeatAck} onChange={e => setRepeatAck(e.target.checked)} />Ich möchte diese Videos bewusst ein zweites Mal senden.</label>
+            <label className="flex items-start gap-2 font-mono text-xs text-coal-300"><input type="checkbox" className="size-4 shrink-0 accent-orange-500" style={{ display: 'inline-block' }} checked={repeatAck} onChange={e => setRepeatAck(e.target.checked)} />Ich möchte diese Videos bewusst ein zweites Mal senden.</label>
           </div>}
         </fieldset>
         <fieldset disabled={submitting} className="grid min-w-0 gap-3">
@@ -251,7 +244,7 @@ export default function PostScheduleModal({ targetItems, existingPosts, autoStar
           {uploadingNow && <>
             <p>HOCHLADEN {Math.min(uploadDone + (currentUpload ? 1 : 0), uploadTotal)}/{uploadTotal} — {currentUpload ? `Video ${String(currentUpload.item.index + 1).padStart(2, '0')}` : ''}</p>
             <progress max={100} value={uploadPercent} className="w-full accent-lime-400" />
-            <p className="text-coal-400">Videos werden direkt zum ausgewählten Provider übertragen. Danach startet der Buffer-Versand automatisch.</p>
+            <p className="text-coal-400">Videos werden direkt zu OnlyFiles übertragen. Danach startet der Buffer-Versand automatisch.</p>
           </>}
           {progress && <>
             <p>{progress.message}</p>

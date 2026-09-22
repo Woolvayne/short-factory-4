@@ -32,7 +32,7 @@ export default function BufferChannels({ config, onChange, disabled = false }: {
         const options = channels.filter(c => c.service === platform);
         return <div key={platform} className={`border p-3 ${selected ? 'border-volt-400/60 bg-volt-400/5' : 'border-coal-700'}`}>
           <label className="flex items-center gap-2 font-mono text-xs uppercase text-paper-100">
-            <input type="checkbox" style={{ display: 'inline-block' }} disabled={disabled} checked={selected} onChange={() => update({ ...config, defaultPlatforms: selected ? config.defaultPlatforms.filter(p => p !== platform) : [...config.defaultPlatforms, platform] })} />{platform}
+            <input type="checkbox" className="size-4 shrink-0 accent-orange-500" style={{ display: 'inline-block' }} disabled={disabled} checked={selected} onChange={() => update({ ...config, defaultPlatforms: selected ? config.defaultPlatforms.filter(p => p !== platform) : [...config.defaultPlatforms, platform] })} />{platform}
           </label>
           {options.length ? <select aria-label={`${platform} Buffer-Kanal`} disabled={disabled} value={config[key]} onChange={e => update({ ...config, [key]: e.target.value })} className="mt-2 w-full border border-coal-600 bg-coal-850 p-2 text-xs text-paper-100">
             <option value="">Kanal auswählen …</option>

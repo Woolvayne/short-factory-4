@@ -765,7 +765,7 @@ export default function App() {
               { icon: Mic, k: "VOICE BENCH", v: "EDGE READ-ALOUD · WEBSOCKET" },
               { icon: Captions, k: "CAPTION JIG", v: "WORD-BOUNDARY TIMINGS" },
               { icon: Clapperboard, k: "RENDER MILL", v: "CANVAS + MEDIARECORDER" },
-              { icon: FileArchive, k: "DISPATCH", v: "ZIP LOCAL · R2 / B2 / PUTER" },
+              { icon: FileArchive, k: "DISPATCH", v: "ZIP LOKAL · ONLYFILES → BUFFER" },
               {
                 icon: HardDrive,
                 k: "ASSET VAULT",
@@ -798,7 +798,7 @@ export default function App() {
           </span>
         </div>
 
-        <div ref={factoryRef} className="grid gap-5 scroll-mt-24 xl:grid-cols-2">
+        <div ref={factoryRef} className="grid gap-5 scroll-mt-24 lg:grid-cols-2">
           <div className="grid content-start gap-5">
             <SettingsPanel settings={settings} onChange={setSettings} disabled={busy} />
             <IdeasPanel
