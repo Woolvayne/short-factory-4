@@ -9,6 +9,12 @@
  *
  * Puter is the third, browser-only option. The client writes the Blob through
  * Puter.js and asks Puter for its public read URL, so it needs no server secret.
+ *
+ * OnlyFiles is the zero-setup option: a free anonymous host (no account, no API
+ * key, no bucket) whose upload API is CORS-enabled, so the browser posts the
+ * Blob straight to it and keeps the file forever (`expire=0`). The server is
+ * only asked to confirm which of the host's URLs really serves the video bytes —
+ * Buffer must never receive a share or preview page.
  */
 import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
@@ -17,13 +23,38 @@ import { requirePassword } from '../shared/auth.js';
 
 export const config = { runtime: 'nodejs', maxDuration: 60 };
 
-const PROVIDERS = ['r2', 'b2', 'puter'];
+const PROVIDERS = ['onlyfiles', 'r2', 'b2', 'puter'];
 const MAX_UPLOAD_BYTES = 5 * 1024 * 1024 * 1024; // one-part browser PUT ceiling
 const PRESIGN_TTL_SECONDS = 15 * 60;
 const PATH_PREFIX = 'shortsfactory/';
 const ALLOWED_CONTENT_TYPES = new Set(['video/mp4', 'video/webm']);
 
+/**
+ * OnlyFiles — free anonymous hosting, verified 2026-09-22 against
+ * https://onlyfiles.com/api and the live response headers of
+ * https://api.onlyfiles.com/v1/upload (`access-control-allow-origin: *`).
+ * No account, no key: `expire=0` keeps the file, 100 MB per file,
+ * 500 files / 50 GB per hour and 5,000 files / 100 GB per day.
+ */
+const ONLYFILES = {
+  uploadEndpoint: 'https://api.onlyfiles.com/v1/upload',
+  publicBase: 'https://onlyfiles.com',
+  fileField: 'file',
+  /** `expire=0` means "keep forever"; the API default would be 24 hours. */
+  expireForever: '0',
+  maxBytes: 100 * 1000 * 1000, // documented "max 100 MB" per file
+  /** Share/download routes are probed in this order; the first one serving the video wins. */
+  paths: ['dl/{id}/{name}', '{id}/{name}'],
+  probeTimeoutMs: 20_000,
+};
+
 const META = {
+  onlyfiles: {
+    label: 'OnlyFiles',
+    description: 'Anonym, ohne Konto und ohne Einrichtung: unbegrenzt viele Dateien, Dauer-Link, 100 MB pro Datei.',
+    setupUrl: 'https://onlyfiles.com/api',
+    mode: 'browser',
+  },
   r2: {
     label: 'Cloudflare R2',
     description: 'S3-kompatibel, unbegrenzter Bucket-Speicher und kein Egress-Aufpreis.',
@@ -116,8 +147,9 @@ export function storageConfig(provider) {
   return null;
 }
 
+/** Browser-only adapters need no server credentials, so they are always ready. */
 export function providerIsConfigured(provider) {
-  return provider === 'puter' || Boolean(storageConfig(provider));
+  return provider === 'puter' || provider === 'onlyfiles' || Boolean(storageConfig(provider));
 }
 
 export function providerStatuses() {
@@ -131,7 +163,8 @@ export function providerStatuses() {
 export function defaultProvider() {
   const requested = nonEmpty('STORAGE_PROVIDER').toLowerCase();
   if (PROVIDERS.includes(requested) && providerIsConfigured(requested)) return requested;
-  return ['r2', 'b2', 'puter'].find(provider => providerIsConfigured(provider));
+  // Zero-setup first: OnlyFiles needs no account, key or bucket at all.
+  return PROVIDERS.find(provider => providerIsConfigured(provider));
 }
 
 function safeFilename(filename) {
@@ -177,6 +210,93 @@ export function preparePuterUpload(body) {
   return { ok: true, provider: 'puter', key };
 }
 
+/**
+ * OnlyFiles needs nothing but the file itself: the browser posts it as
+ * `multipart/form-data` to the public API, which answers with CORS `*`.
+ * This route only hands out the endpoint plus the hard 100 MB per-file cap so
+ * the client can fail before burning an upload.
+ */
+export function prepareOnlyFilesUpload(body) {
+  const contentType = validateUploadMeta(body);
+  const size = Number(body.size);
+  if (Number.isFinite(size) && size > ONLYFILES.maxBytes) {
+    throw new StorageError(
+      `OnlyFiles nimmt maximal 100 MB pro Datei an — dieses Video hat ${(size / 1_000_000).toFixed(1)} MB. `
+      + 'Bitrate/Auflösung in den Settings reduzieren oder R2/B2/Puter wählen. Es wurde nichts hochgeladen.',
+      413
+    );
+  }
+  return {
+    ok: true,
+    provider: 'onlyfiles',
+    endpoint: ONLYFILES.uploadEndpoint,
+    fileField: ONLYFILES.fileField,
+    expire: ONLYFILES.expireForever,
+    maxBytes: ONLYFILES.maxBytes,
+    contentType,
+    filename: safeFilename(body.filename),
+  };
+}
+
+/**
+ * Rebuild the host's URLs server-side from a validated id + safe filename.
+ * The client never supplies a URL to probe, so this cannot be turned into an
+ * SSRF request against internal hosts.
+ */
+export function onlyFilesCandidates(id, filename) {
+  const fileId = String(id || '').trim();
+  if (!/^[A-Za-z0-9_-]{4,64}$/.test(fileId)) {
+    throw new StorageError('Ungültige OnlyFiles-Datei-ID.', 400);
+  }
+  const name = safeFilename(filename);
+  return ONLYFILES.paths.map(pattern =>
+    `${ONLYFILES.publicBase}/${pattern.replace('{id}', fileId).replace('{name}', encodeURIComponent(name))}`);
+}
+
+/** Only a URL that really answers with video bytes may reach Buffer. */
+function servesVideo(response) {
+  if (!(response.ok || response.status === 206)) return false;
+  const type = contentTypeOf(response.headers?.get?.('content-type'));
+  return Boolean(type) && !/^text\/html/i.test(type) && (type.startsWith('video/') || type === 'application/octet-stream');
+}
+
+/**
+ * Verify a finished OnlyFiles upload and return the direct URL for Buffer.
+ * `https://onlyfiles.com/{id}/{name}` is the share page, `/dl/{id}/{name}` is
+ * the direct file route (same operator as tmpfiles.org). Instead of guessing,
+ * both are probed with a byte-range GET and the first real video wins.
+ */
+export async function verifyOnlyFilesUpload(body, fetchImpl = globalThis.fetch) {
+  const candidates = onlyFilesCandidates(body?.id, body?.filename);
+  for (const url of candidates) {
+    let response;
+    try {
+      response = await fetchImpl(url, {
+        method: 'GET',
+        headers: { Range: 'bytes=0-4095', Accept: '*/*' },
+        signal: AbortSignal.timeout(ONLYFILES.probeTimeoutMs),
+      });
+    } catch {
+      continue; // unreachable candidate — try the next URL shape
+    }
+    try { response.body?.cancel?.(); } catch { /* already consumed */ }
+    if (servesVideo(response)) {
+      return {
+        ok: true,
+        provider: 'onlyfiles',
+        id: String(body.id).trim(),
+        publicUrl: url,
+        contentType: contentTypeOf(response.headers?.get?.('content-type')),
+      };
+    }
+  }
+  throw new StorageError(
+    'OnlyFiles hat die Datei angenommen, aber keine Adresse liefert das Video direkt aus. '
+    + 'Es wurde nichts an Buffer gesendet — bitte erneut hochladen oder R2/B2/Puter wählen.',
+    502
+  );
+}
+
 export async function prepareS3Upload(provider, body) {
   const config = storageConfig(provider);
   if (!config) {
@@ -205,6 +325,7 @@ export async function prepareUpload(body) {
   const provider = String(body?.provider || '').toLowerCase();
   if (!PROVIDERS.includes(provider)) throw new StorageError('Unbekannter Upload-Provider.', 400);
   if (provider === 'puter') return preparePuterUpload(body);
+  if (provider === 'onlyfiles') return prepareOnlyFilesUpload(body);
   return prepareS3Upload(provider, body);
 }
 
@@ -229,8 +350,13 @@ export default async function handler(req, res) {
   try {
     const body = (typeof req.body === 'string' ? JSON.parse(req.body || '{}') : req.body) || {};
     if (!body || typeof body !== 'object' || Array.isArray(body)) throw new StorageError('Ungültige Anfrage.', 400);
-    if (body.action !== 'prepare') throw new StorageError('Unbekannte Upload-Aktion.', 400);
-    return res.status(200).json(await prepareUpload(body));
+    if (body.action === 'prepare') return res.status(200).json(await prepareUpload(body));
+    if (body.action === 'verify') {
+      const provider = String(body.provider || '').toLowerCase();
+      if (provider !== 'onlyfiles') throw new StorageError('Diese Aktion wird nur für OnlyFiles benötigt.', 400);
+      return res.status(200).json(await verifyOnlyFilesUpload(body));
+    }
+    throw new StorageError('Unbekannte Upload-Aktion.', 400);
   } catch (error) {
     if (error instanceof SyntaxError) return res.status(400).json({ error: 'Ungültige Anfrage.', uncertain: false });
     return res.status(error.status || 500).json({ error: error.message || 'Upload-Vorbereitung fehlgeschlagen.', uncertain: false });

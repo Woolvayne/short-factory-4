@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { AlertTriangle, Check, ExternalLink, HardDriveUpload, Loader2, Send, X } from 'lucide-react';
 import type { LocalRenderItem } from '../lib/types';
 import { DEFAULT_DESCRIPTION, formatBerlinDateTime, loadBufferConfig, planSlots, saveBufferConfig, scheduleBatchPosts, validateVideoUrl, type DispatchProgress, type ScheduledPost, type ScheduleMode } from '../lib/scheduler';
-import { fetchUploadStatus, loadUploadProvider, providerLabel, saveUploadProvider, uploadRenderFile, type UploadHostStatus, type UploadProvider } from '../lib/uploader';
+import { fetchUploadStatus, loadUploadProvider, providerHint, providerLabel, saveUploadProvider, uploadRenderFile, type UploadHostStatus, type UploadProvider } from '../lib/uploader';
 import { videoFileName } from './MissionControl';
 import BufferChannels from './BufferChannels';
 
@@ -59,7 +59,7 @@ export default function PostScheduleModal({ targetItems, existingPosts, autoStar
       const saved = loadUploadProvider();
       if (status.providers[saved]?.configured) setProvider(saved);
       else if (status.providers[status.provider]?.configured) setProvider(status.provider);
-      else setProvider('puter');
+      else setProvider('onlyfiles');
     }).catch(() => setHost(null));
     return () => controller.abort();
   }, []);
@@ -169,8 +169,8 @@ export default function PostScheduleModal({ targetItems, existingPosts, autoStar
             <HardDriveUpload className="mt-0.5 size-4 shrink-0 text-volt-300" />
             <span>Buffer nimmt keine Datei-Bytes an: Der ausgewählte Provider erzeugt eine dauerhafte öffentliche HTTPS-Adresse. Das Video wird direkt dorthin übertragen, erst danach bekommt Buffer den Link. <strong>Kein Vercel Blob.</strong></span>
           </div>
-          <div className="grid gap-2 sm:grid-cols-3">
-            {(['r2', 'b2', 'puter'] as UploadProvider[]).map(option => {
+          <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+            {(['onlyfiles', 'r2', 'b2', 'puter'] as UploadProvider[]).map(option => {
               const info = host?.providers?.[option];
               const available = Boolean(info?.configured);
               return <button key={option} type="button" disabled={submitting || !available} onClick={() => selectProvider(option)} className={`grid gap-1 border p-3 text-left ${provider === option ? 'border-volt-400 bg-volt-400/10' : 'border-coal-700'} ${!available ? 'cursor-not-allowed opacity-45' : ''}`}>
@@ -179,7 +179,7 @@ export default function PostScheduleModal({ targetItems, existingPosts, autoStar
               </button>;
             })}
           </div>
-          {selectedProvider && <p className="font-mono text-[10px] leading-relaxed text-coal-300"><strong>{selectedProvider.label}:</strong> {selectedProvider.mode === 'browser' ? 'Beim ersten Upload öffnet Puter die Anmeldung. Die Datei bleibt in deinem Puter-Konto.' : 'Server-Umgebungsvariablen signieren nur die kurzlebige PUT-Adresse; Geheimnisse verlassen den Server nicht.'} <a href={selectedProvider.setupUrl} target="_blank" rel="noreferrer" className="ml-1 inline-flex items-center gap-1 text-volt-300 underline"><ExternalLink className="size-3" />Einrichtung</a></p>}
+          {selectedProvider && <p className="font-mono text-[10px] leading-relaxed text-coal-300"><strong>{selectedProvider.label}:</strong> {providerHint(selectedProvider.provider)} <a href={selectedProvider.setupUrl} target="_blank" rel="noreferrer" className="ml-1 inline-flex items-center gap-1 text-volt-300 underline"><ExternalLink className="size-3" />Einrichtung</a></p>}
           {!host && <p className="font-mono text-[10px] text-coal-400">Lade Providerstatus …</p>}
           {host && !connected && <p className="font-mono text-xs text-amber-warn">{selectedProvider?.label || providerLabel(provider)} ist noch nicht eingerichtet. Folge der Anleitung im README oder wähle einen bereiten Provider.</p>}
           {providerMsg && <p role="status" className="font-mono text-[10px] text-amber-warn">{providerMsg}</p>}

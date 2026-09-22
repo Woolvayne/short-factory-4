@@ -3,12 +3,25 @@
  *
  * Buffer only accepts stable public media URLs. R2 and B2 receive the Blob
  * directly from the browser through a short-lived, server-signed PUT URL.
- * Puter.js receives it in the browser and returns a readable public URL. The
- * Vercel function never receives video bytes and Vercel Blob is not involved.
+ * Puter.js receives it in the browser and returns a readable public URL.
+ * OnlyFiles is the zero-setup anonymous host: no account, no key, no bucket —
+ * the browser posts the Blob to its CORS-enabled public API and the server only
+ * confirms which returned URL really serves the video. The Vercel function never
+ * receives video bytes and Vercel Blob is not involved.
  */
 import { authHeaders } from './auth.ts';
 
-export type UploadProvider = 'r2' | 'b2' | 'puter';
+export type UploadProvider = 'onlyfiles' | 'r2' | 'b2' | 'puter';
+
+const PROVIDERS: readonly UploadProvider[] = ['onlyfiles', 'r2', 'b2', 'puter'] as const;
+/** Fallback when nothing is stored or configured: the adapter that needs no setup. */
+const FALLBACK_PROVIDER: UploadProvider = 'onlyfiles';
+
+export function asUploadProvider(value: unknown): UploadProvider | null {
+  return typeof value === 'string' && (PROVIDERS as readonly string[]).includes(value)
+    ? (value as UploadProvider)
+    : null;
+}
 
 export interface ProviderStatus {
   provider: UploadProvider;
@@ -49,10 +62,9 @@ declare global {
 
 export function loadUploadProvider(): UploadProvider {
   try {
-    const value = localStorage.getItem(PROVIDER_KEY);
-    return value === 'r2' || value === 'b2' || value === 'puter' ? value : 'puter';
+    return asUploadProvider(localStorage.getItem(PROVIDER_KEY)) ?? FALLBACK_PROVIDER;
   } catch {
-    return 'puter';
+    return FALLBACK_PROVIDER;
   }
 }
 
@@ -60,8 +72,27 @@ export function saveUploadProvider(provider: UploadProvider) {
   try { localStorage.setItem(PROVIDER_KEY, provider); } catch { /* private mode */ }
 }
 
+const PROVIDER_LABELS: Record<UploadProvider, string> = {
+  onlyfiles: 'OnlyFiles',
+  r2: 'Cloudflare R2',
+  b2: 'Backblaze B2',
+  puter: 'Puter.js',
+};
+
 export function providerLabel(provider: UploadProvider): string {
-  return provider === 'r2' ? 'Cloudflare R2' : provider === 'b2' ? 'Backblaze B2' : 'Puter.js';
+  return PROVIDER_LABELS[provider] ?? provider;
+}
+
+/** Shown in the dispatch window under the selected provider card. */
+export function providerHint(provider: UploadProvider): string {
+  switch (provider) {
+    case 'onlyfiles':
+      return 'Kein Konto, kein Key, kein Bucket: Der Upload läuft anonym direkt im Browser und die Datei bleibt dauerhaft liegen (max. 100 MB pro Datei). Der Server prüft danach, welche Adresse das Video wirklich direkt ausliefert — nur die bekommt Buffer.';
+    case 'puter':
+      return 'Beim ersten Upload öffnet Puter die Anmeldung. Die Datei bleibt in deinem Puter-Konto.';
+    default:
+      return 'Server-Umgebungsvariablen signieren nur die kurzlebige PUT-Adresse; Geheimnisse verlassen den Server nicht.';
+  }
 }
 
 export async function fetchUploadStatus(signal?: AbortSignal): Promise<UploadHostStatus> {
@@ -70,22 +101,19 @@ export async function fetchUploadStatus(signal?: AbortSignal): Promise<UploadHos
   if (!res.ok || !data) throw new Error(data?.error || 'Upload-Backend nicht erreichbar.');
   return {
     configured: Boolean(data.configured),
-    provider: data.provider === 'r2' || data.provider === 'b2' || data.provider === 'puter' ? data.provider : 'puter',
+    provider: asUploadProvider(data.provider) ?? FALLBACK_PROVIDER,
     providers: data.providers as Record<UploadProvider, ProviderStatus>,
   };
 }
 
-async function prepareUpload(
-  provider: UploadProvider,
-  opts: { filename: string; contentType: string; size: number },
-  signal?: AbortSignal
-): Promise<Record<string, unknown>> {
+/** Every call to the same-origin upload route goes through here (prepare + verify). */
+async function callUploadApi(body: Record<string, unknown>, signal?: AbortSignal): Promise<Record<string, unknown>> {
   let response: Response;
   try {
     response = await fetch('/api/upload', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...authHeaders() },
-      body: JSON.stringify({ action: 'prepare', provider, ...opts }),
+      body: JSON.stringify(body),
       signal,
     });
   } catch {
@@ -96,6 +124,41 @@ async function prepareUpload(
     throw new Error(data?.error || `Upload-Vorbereitung fehlgeschlagen (HTTP ${response.status}).`);
   }
   return data as Record<string, unknown>;
+}
+
+async function prepareUpload(
+  provider: UploadProvider,
+  opts: { filename: string; contentType: string; size: number },
+  signal?: AbortSignal
+): Promise<Record<string, unknown>> {
+  return callUploadApi({ action: 'prepare', provider, ...opts }, signal);
+}
+
+/** Browser-direct multipart POST with progress — used by the anonymous host. */
+function postMultipart(
+  endpoint: string,
+  form: FormData,
+  signal: AbortSignal | undefined,
+  onProgress?: (progress: UploadProgress) => void
+): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', endpoint);
+    // No manual Content-Type: the browser must set the multipart boundary itself.
+    xhr.upload.onprogress = event => {
+      if (event.lengthComputable) onProgress?.({ loaded: event.loaded, total: event.total });
+    };
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) resolve(xhr.responseText);
+      else reject(new Error(`OnlyFiles hat HTTP ${xhr.status} gemeldet: ${xhr.responseText.slice(0, 180)}`));
+    };
+    xhr.onerror = () => reject(new Error('Direkter Upload zu OnlyFiles fehlgeschlagen (Netzwerk oder CORS).'));
+    xhr.onabort = () => reject(new DOMException('Upload abgebrochen.', 'AbortError'));
+    const onAbort = () => xhr.abort();
+    signal?.addEventListener('abort', onAbort, { once: true });
+    xhr.onloadend = () => signal?.removeEventListener('abort', onAbort);
+    xhr.send(form);
+  });
 }
 
 function putToSignedUrl(
@@ -176,6 +239,53 @@ async function uploadToPuter(
   return publicUrl;
 }
 
+/**
+ * Anonymous, zero-setup upload: prepare (server checks type + 100 MB cap),
+ * post the Blob straight to OnlyFiles, then let the server confirm which URL
+ * serves the file itself. Buffer only ever receives that verified URL.
+ */
+async function uploadToOnlyFiles(
+  file: Blob,
+  opts: { filename: string; contentType: string; signal?: AbortSignal; onProgress?: (progress: UploadProgress) => void }
+): Promise<string> {
+  if (opts.signal?.aborted) throw new DOMException('Upload abgebrochen.', 'AbortError');
+  const prepared = await prepareUpload('onlyfiles', {
+    filename: opts.filename,
+    contentType: opts.contentType.split(';', 1)[0].toLowerCase() || file.type || 'video/mp4',
+    size: file.size,
+  }, opts.signal);
+  const endpoint = String(prepared.endpoint || '');
+  if (!/^https:\/\//i.test(endpoint)) throw new Error('Das Upload-Backend hat keine OnlyFiles-Adresse geliefert.');
+
+  const form = new FormData();
+  const uploadName = String(prepared.filename || opts.filename || 'video.mp4');
+  form.append(String(prepared.fileField || 'file'), file, uploadName);
+  form.append('expire', String(prepared.expire ?? '0')); // 0 = keep the file forever
+  opts.onProgress?.({ loaded: 0, total: file.size });
+  const raw = await postMultipart(endpoint, form, opts.signal, opts.onProgress);
+
+  let payload: { status?: boolean; error?: { message?: string }; data?: { file?: { metadata?: { id?: string; name?: string } } } } | null = null;
+  try { payload = JSON.parse(raw); } catch { payload = null; }
+  if (!payload || payload.status === false) {
+    throw new Error(payload?.error?.message || `OnlyFiles hat den Upload abgelehnt: ${raw.slice(0, 180)}`);
+  }
+  const metadata = payload.data?.file?.metadata;
+  const id = String(metadata?.id || '');
+  if (!id) throw new Error('OnlyFiles hat keine Datei-ID zurückgegeben.');
+  if (opts.signal?.aborted) throw new DOMException('Upload abgebrochen.', 'AbortError');
+
+  const verified = await callUploadApi({
+    action: 'verify',
+    provider: 'onlyfiles',
+    id,
+    filename: String(metadata?.name || uploadName),
+  }, opts.signal);
+  const publicUrl = String(verified.publicUrl || '');
+  if (!/^https:\/\//i.test(publicUrl)) throw new Error('OnlyFiles hat keine überprüfte Direkt-Adresse geliefert.');
+  opts.onProgress?.({ loaded: file.size, total: file.size });
+  return publicUrl;
+}
+
 /** Upload one rendered video and return the permanent public URL for Buffer. */
 export async function uploadRenderFile(
   file: Blob,
@@ -187,6 +297,9 @@ export async function uploadRenderFile(
     onProgress?: (progress: UploadProgress) => void;
   }
 ): Promise<string> {
+  if (opts.provider === 'onlyfiles') {
+    return uploadToOnlyFiles(file, opts);
+  }
   if (opts.provider === 'puter') {
     return uploadToPuter(file, { filename: opts.filename, signal: opts.signal, onProgress: opts.onProgress });
   }
