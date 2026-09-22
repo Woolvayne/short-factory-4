@@ -1,215 +1,139 @@
 import { test, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { createHmac } from 'node:crypto';
-import handler, { resolveHost, generateClientToken, isBlobClientRequest } from '../api/upload.js';
+import handler, { buildObjectKey, defaultProvider, prepareUpload, providerStatuses, storageConfig } from '../api/upload.js';
 import { validateVideoUrl } from '../shared/buffer.js';
 
-const ENV_KEYS = ['BLOB_READ_WRITE_TOKEN'];
-const saved = Object.fromEntries(ENV_KEYS.map(k => [k, process.env[k]]));
-const savedFetch = globalThis.fetch;
+const ENV_KEYS = [
+  'SHORTSFACTORY_PASSWORD', 'STORAGE_PROVIDER',
+  'R2_ACCOUNT_ID', 'R2_ACCESS_KEY_ID', 'R2_SECRET_ACCESS_KEY', 'R2_BUCKET_NAME', 'R2_PUBLIC_BASE_URL',
+  'B2_S3_ENDPOINT', 'B2_S3_REGION', 'B2_KEY_ID', 'B2_APPLICATION_KEY', 'B2_BUCKET_NAME', 'B2_PUBLIC_BASE_URL',
+];
+const saved = Object.fromEntries(ENV_KEYS.map(key => [key, process.env[key]]));
 
-/** Realistic but fake tokens — format vercel_blob_rw_<storeId>_<secret>. */
-const ENV_TOKEN = 'vercel_blob_rw_ENVSTORE_secret-env';
-const APP_TOKEN = 'vercel_blob_rw_APPSTORE_secret-app';
-
-function setEnv(over = {}) {
-  const base = { BLOB_READ_WRITE_TOKEN: ENV_TOKEN, ...over };
-  for (const k of ENV_KEYS) process.env[k] = base[k] ?? saved[k] ?? '';
+function setEnv(values = {}) {
+  for (const key of ENV_KEYS) delete process.env[key];
+  for (const [key, value] of Object.entries(values)) process.env[key] = value;
 }
+
 beforeEach(() => setEnv());
 afterEach(() => {
-  for (const k of ENV_KEYS) { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; }
-  globalThis.fetch = savedFetch;
+  for (const key of ENV_KEYS) {
+    if (saved[key] === undefined) delete process.env[key];
+    else process.env[key] = saved[key];
+  }
 });
 
-async function request(body, method = 'POST', headers = {}, url = '/api/upload') {
-  let status = 200, payload;
+async function request(body, method = 'POST', headers = {}) {
+  let status = 200;
+  let payload;
   const response = {
     setHeader() {},
     status(code) { status = code; return this; },
-    json(data) { payload = data; },
+    json(data) { payload = data; return this; },
   };
-  await handler({ method, headers, body, url }, response);
+  await handler({ method, headers, body }, response);
   return { status, payload };
 }
 
-function clientTokenRequest(pathname) {
-  return { type: 'blob.generate-client-token', payload: { pathname, clientPayload: null, multipart: false } };
-}
+const r2Env = {
+  R2_ACCOUNT_ID: 'account123',
+  R2_ACCESS_KEY_ID: 'r2-access',
+  R2_SECRET_ACCESS_KEY: 'r2-secret',
+  R2_BUCKET_NAME: 'shorts',
+  R2_PUBLIC_BASE_URL: 'https://media.example.com',
+};
 
-/** Decode and verify a vercel_blob_client_<storeId>_<base64(sig.payload)> token. */
-function decodeClientToken(clientToken, signingToken) {
-  const parts = clientToken.split('_');
-  assert.equal(parts[0], 'vercel');
-  assert.equal(parts[1], 'blob');
-  assert.equal(parts[2], 'client');
-  const storeId = parts[3];
-  const inner = Buffer.from(parts.slice(4).join('_'), 'base64').toString('utf8');
-  const dot = inner.indexOf('.');
-  const signature = inner.slice(0, dot);
-  const payloadB64 = inner.slice(dot + 1);
-  const expected = createHmac('sha256', signingToken).update(payloadB64, 'utf8').digest('hex');
-  assert.equal(signature, expected, 'client token must be signed with the resolving read/write token');
-  return { storeId, payload: JSON.parse(Buffer.from(payloadB64, 'base64').toString('utf8')) };
-}
+const b2Env = {
+  B2_S3_ENDPOINT: 'https://s3.eu-central-003.backblazeb2.com',
+  B2_S3_REGION: 'eu-central-003',
+  B2_KEY_ID: 'b2-key',
+  B2_APPLICATION_KEY: 'b2-secret',
+  B2_BUCKET_NAME: 'shorts',
+  B2_PUBLIC_BASE_URL: 'https://f000.backblazeb2.com/file/shorts',
+};
 
-/* ------------------------------ GET status ------------------------------ */
+test('GET exposes all three providers without leaking credentials', async () => {
+  const result = await request(undefined, 'GET');
+  assert.equal(result.status, 200);
+  assert.equal(result.payload.configured, true); // Puter is browser-only and needs no env
+  assert.equal(result.payload.provider, 'puter');
+  assert.equal(result.payload.providers.r2.configured, false);
+  assert.equal(result.payload.providers.b2.configured, false);
+  assert.equal(result.payload.providers.puter.configured, true);
+  assert.ok(!JSON.stringify(result.payload).includes('r2-secret'));
+  assert.ok(!JSON.stringify(result.payload).includes('b2-secret'));
 
-test('GET reports Vercel Blob as the only provider and never leaks the token', async () => {
-  const ok = await request(undefined, 'GET');
-  assert.equal(ok.status, 200);
-  assert.equal(ok.payload.configured, true);
-  assert.equal(ok.payload.provider, 'vblob');
-  assert.ok(!JSON.stringify(ok.payload).includes('secret-env'));
-
-  setEnv({ BLOB_READ_WRITE_TOKEN: '' });
-  const off = await request(undefined, 'GET');
-  assert.equal(off.status, 200);
-  assert.deepEqual(off.payload, { configured: false, provider: null });
+  setEnv({ ...r2Env, ...b2Env, STORAGE_PROVIDER: 'b2' });
+  const configured = await request(undefined, 'GET');
+  assert.equal(configured.payload.providers.r2.configured, true);
+  assert.equal(configured.payload.providers.b2.configured, true);
+  assert.equal(configured.payload.provider, 'b2');
 });
 
-/* --------------------- offline client-token generation --------------------- */
-
-test('client token is generated offline, constrained and correctly signed', async () => {
-  // any network call during token issuance must fail the test
-  globalThis.fetch = async () => { throw new Error('network must not be touched'); };
-  const before = Date.now();
-  const res = await request(clientTokenRequest('shortsfactory/20260920T123456Z-abcd1234-mein-video.mp4'));
-  assert.equal(res.status, 200);
-  assert.equal(res.payload.type, 'blob.generate-client-token');
-  const { storeId, payload } = decodeClientToken(res.payload.clientToken, ENV_TOKEN);
-  assert.equal(storeId, 'ENVSTORE');
-  assert.equal(payload.pathname, 'shortsfactory/20260920T123456Z-abcd1234-mein-video.mp4');
-  assert.deepEqual(payload.allowedContentTypes, ['video/mp4', 'video/webm']);
-  assert.equal(payload.maximumSizeInBytes, 2 * 1024 * 1024 * 1024);
-  assert.equal(payload.addRandomSuffix, true);
-  assert.ok(payload.validUntil > before && payload.validUntil <= Date.now() + 60 * 60 * 1000 + 1000);
-  assert.ok(!JSON.stringify(res.payload).includes('secret-env'));
+test('server password protects upload status and prepare routes', async () => {
+  setEnv({ ...r2Env, SHORTSFACTORY_PASSWORD: 'correct horse' });
+  const denied = await request(undefined, 'GET');
+  assert.equal(denied.status, 401);
+  assert.equal(denied.payload.code, 'auth_required');
+  const allowed = await request(undefined, 'GET', { 'x-sf-password': 'correct horse' });
+  assert.equal(allowed.status, 200);
+  assert.equal((await request({ action: 'prepare', provider: 'puter', filename: 'a.mp4' }, 'POST', { 'x-sf-password': 'correct horse' })).status, 200);
 });
 
-test('path guard: only shortsfactory/* without traversal or junk is accepted', async () => {
-  globalThis.fetch = async () => { throw new Error('network must not be touched'); };
-  for (const bad of [
-    'evil/2026-video.mp4',
-    'shortsfactory/../evil.mp4',
-    'shortsfactory//doppelt.mp4',
-    'shortsfactory/a b.mp4',
-    'shortsfactory/query?.mp4',
-    'shortsfactory/',
-    'shortsfactory/x',
-    '',
-  ]) {
-    const res = await request(clientTokenRequest(bad));
-    assert.equal(res.status, 400, JSON.stringify(bad));
-    assert.match(res.payload.error, /shortsfactory|Pfad/);
-  }
-  const good = await request(clientTokenRequest('shortsfactory/20260920T123456Z-deadbeef-clip-01.webm'));
-  assert.equal(good.status, 200);
+test('Puter preparation is credential-free and returns a unique safe path', async () => {
+  const result = await prepareUpload({ provider: 'puter', filename: '../my video?.mp4', contentType: 'video/mp4', size: 123 });
+  assert.equal(result.ok, true);
+  assert.equal(result.provider, 'puter');
+  assert.match(result.key, /^shortsfactory\/[\w.-]+\.mp4$/);
+  assert.ok(!result.key.includes('..'));
 });
 
-test('client token is refused with 503 when nothing is configured', async () => {
-  setEnv({ BLOB_READ_WRITE_TOKEN: '' });
-  globalThis.fetch = async () => { throw new Error('network must not be touched'); };
-  const res = await request(clientTokenRequest('shortsfactory/a-video.mp4'));
-  assert.equal(res.status, 503);
-  assert.match(res.payload.error, /BLOB_READ_WRITE_TOKEN|Versandfenster/);
-  assert.equal(res.payload.uncertain, false);
+test('R2 preparation creates a signed PUT URL and stable public URL without touching the video bytes', async () => {
+  setEnv(r2Env);
+  const result = await prepareUpload({ provider: 'r2', filename: 'clip.mp4', contentType: 'video/mp4', size: 1024 });
+  assert.equal(result.ok, true);
+  assert.equal(result.provider, 'r2');
+  assert.match(result.uploadUrl, /^https:\/\/shorts\.account123\.r2\.cloudflarestorage\.com/);
+  assert.match(result.uploadUrl, /X-Amz-Signature=/);
+  assert.ok(!result.uploadUrl.includes('x-amz-sdk-checksum-algorithm'));
+  assert.match(result.publicUrl, /^https:\/\/media\.example\.com\/shortsfactory\/.*-clip\.mp4$/);
+  assert.equal(result.contentType, 'video/mp4');
+  assert.equal(result.expiresIn, 900);
 });
 
-/* ---------------------------- provider priority ---------------------------- */
-
-test('env token beats the in-app token; in-app token works without env', async () => {
-  globalThis.fetch = async () => { throw new Error('network must not be touched'); };
-
-  // env + in-app → env wins (store id AND signature belong to the env token)
-  const both = await request(clientTokenRequest('shortsfactory/v.mp4'), 'POST', { 'x-sf-blob-token': APP_TOKEN });
-  assert.equal(both.status, 200);
-  assert.equal(decodeClientToken(both.payload.clientToken, ENV_TOKEN).storeId, 'ENVSTORE');
-  assert.throws(() => decodeClientToken(both.payload.clientToken, APP_TOKEN));
-
-  // in-app only (header and body variants) → app token is used
-  setEnv({ BLOB_READ_WRITE_TOKEN: '' });
-  const viaHeader = await request(clientTokenRequest('shortsfactory/v.mp4'), 'POST', { 'x-sf-blob-token': APP_TOKEN });
-  assert.equal(decodeClientToken(viaHeader.payload.clientToken, APP_TOKEN).storeId, 'APPSTORE');
-  const viaBody = await request({ ...clientTokenRequest('shortsfactory/v.mp4'), blobToken: APP_TOKEN });
-  assert.equal(decodeClientToken(viaBody.payload.clientToken, APP_TOKEN).storeId, 'APPSTORE');
-
-  // resolveHost reflects the same priority
-  assert.equal(resolveHost({ headers: { 'x-sf-blob-token': APP_TOKEN } }).source, 'app');
-  setEnv();
-  assert.equal(resolveHost({ headers: { 'x-sf-blob-token': APP_TOKEN } }).source, 'env');
+test('B2 preparation derives the configured S3 endpoint and public base URL', async () => {
+  setEnv(b2Env);
+  const result = await prepareUpload({ provider: 'b2', filename: 'clip.webm', contentType: 'video/webm;codecs=vp9', size: 1024 });
+  assert.equal(result.provider, 'b2');
+  assert.match(result.uploadUrl, /^https:\/\/shorts\.s3\.eu-central-003\.backblazeb2\.com/);
+  assert.match(result.publicUrl, /^https:\/\/f000\.backblazeb2\.com\/file\/shorts\/shortsfactory\//);
+  assert.equal(result.contentType, 'video/webm');
 });
 
-test('isBlobClientRequest only matches the blob client protocol', () => {
-  assert.equal(isBlobClientRequest(clientTokenRequest('shortsfactory/v.mp4')), true);
-  assert.equal(isBlobClientRequest({ action: 'vblob-check' }), false);
-  assert.equal(isBlobClientRequest(null), false);
-  assert.equal(generateClientToken(ENV_TOKEN, { pathname: 'shortsfactory/v.mp4' }).split('_')[3], 'ENVSTORE');
+test('incomplete server providers fail closed and unsupported media is rejected', async () => {
+  await assert.rejects(() => prepareUpload({ provider: 'r2', filename: 'a.mp4', contentType: 'video/mp4', size: 1 }), /Cloudflare R2.*nicht vollständig/);
+  setEnv(r2Env);
+  await assert.rejects(() => prepareUpload({ provider: 'r2', filename: 'a.mov', contentType: 'video/quicktime', size: 1 }), /MP4- oder WebM/);
+  await assert.rejects(() => prepareUpload({ provider: 'r2', filename: 'a.mp4', contentType: 'video/mp4', size: 6 * 1024 * 1024 * 1024 }), /5 GiB/);
 });
 
-/* ------------------------------- vblob-check ------------------------------- */
-
-test('vblob-check verifies the token against Vercel and maps failures clearly', async () => {
-  setEnv({ BLOB_READ_WRITE_TOKEN: '' });
-  const calls = [];
-  globalThis.fetch = async (url, opts = {}) => {
-    calls.push({ url: String(url), headers: opts.headers });
-    return new Response('{"blobs":[]}', { status: 200 });
-  };
-  const ok = await request({ action: 'vblob-check', blobToken: APP_TOKEN });
-  assert.equal(ok.status, 200);
-  assert.deepEqual(ok.payload, { ok: true });
-  assert.match(calls[0].url, /^https:\/\/vercel\.com\/api\/blob\/\?limit=1$/);
-  assert.equal(calls[0].headers.authorization, `Bearer ${APP_TOKEN}`);
-  assert.equal(calls[0].headers['x-api-version'], '11');
-
-  globalThis.fetch = async () => new Response('{"error":{"code":"unauthorized"}}', { status: 401 });
-  const rejected = await request({ action: 'vblob-check', blobToken: APP_TOKEN });
-  assert.equal(rejected.status, 200);
-  assert.equal(rejected.payload.ok, false);
-  assert.match(rejected.payload.error, /abgelehnt/);
-
-  globalThis.fetch = async () => new Response('Forbidden', { status: 403 });
-  assert.equal((await request({ action: 'vblob-check', blobToken: APP_TOKEN })).payload.ok, false);
-
-  globalThis.fetch = async () => new Response('{"error":{"code":"store_not_found"}}', { status: 404 });
-  const missing = await request({ action: 'vblob-check', blobToken: APP_TOKEN });
-  assert.equal(missing.payload.ok, false);
-  assert.match(missing.payload.error, /Store/);
-
-  globalThis.fetch = async () => { throw new Error('down'); };
-  const down = await request({ action: 'vblob-check', blobToken: APP_TOKEN });
-  assert.equal(down.status, 502);
-  assert.match(down.payload.error, /nicht erreichbar/);
+test('provider helpers keep secrets server-side and choose a configured default', () => {
+  setEnv({ ...r2Env, STORAGE_PROVIDER: 'r2' });
+  assert.equal(defaultProvider(), 'r2');
+  assert.equal(storageConfig('r2').bucket, 'shorts');
+  const key = buildObjectKey('nested\\danger name.mp4');
+  assert.match(key, /^shortsfactory\/.*-danger-name\.mp4$/);
+  const statuses = providerStatuses();
+  assert.equal(statuses.r2.configured, true);
+  assert.equal(statuses.puter.configured, true);
+  assert.ok(!JSON.stringify(statuses).includes('r2-secret'));
 });
 
-test('vblob-check needs a token and validates its format before any network call', async () => {
-  setEnv({ BLOB_READ_WRITE_TOKEN: '' });
-  assert.equal((await request({ action: 'vblob-check' })).status, 400);
-
-  globalThis.fetch = async () => { throw new Error('network must not be touched'); };
-  const bad = await request({ action: 'vblob-check', blobToken: 'not-a-token' });
-  assert.equal(bad.status, 200);
-  assert.equal(bad.payload.ok, false);
-  assert.match(bad.payload.error, /Read\/Write-Token|Format/);
-
-  // with only the env token configured, vblob-check verifies that one
-  setEnv();
-  globalThis.fetch = async (url, opts = {}) => {
-    assert.equal(opts.headers.authorization, `Bearer ${ENV_TOKEN}`);
-    return new Response('{}', { status: 200 });
-  };
-  assert.equal((await request({ action: 'vblob-check' })).payload.ok, true);
-});
-
-/* ------------------------------ route hygiene ------------------------------ */
-
-test('cross-site requests, unknown actions and bad methods are rejected', async () => {
-  assert.equal((await request(clientTokenRequest('shortsfactory/v.mp4'), 'POST', { 'sec-fetch-site': 'cross-site' })).status, 403);
-  assert.equal((await request({ action: 'nope' })).status, 400);
+test('route hygiene and public URL validation remain strict', async () => {
+  setEnv(r2Env);
   assert.equal((await request(undefined, 'PUT')).status, 405);
-});
-
-test('public blob URLs pass the shared Buffer URL validation', () => {
-  assert.equal(validateVideoUrl('https://envstore123.public.blob.vercel-storage.com/shortsfactory/20260920T123456Z-abcd1234-video-XY7.mp4'), '');
+  assert.equal((await request({ action: 'prepare', provider: 'r2', filename: 'a.mp4', contentType: 'video/mp4' }, 'POST', { 'sec-fetch-site': 'cross-site' })).status, 403);
+  assert.equal((await request({ action: 'nope' })).status, 400);
+  assert.equal(validateVideoUrl('https://media.example.com/shortsfactory/clip.mp4'), '');
+  assert.equal(validateVideoUrl('https://f000.backblazeb2.com/file/shorts/shortsfactory/clip.webm'), '');
 });

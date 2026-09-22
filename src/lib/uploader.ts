@@ -1,27 +1,28 @@
 /**
- * Upload-Host: Vercel Blob — der einzige Upload-Weg, kein manueller
- * Link-Eintrag mehr.
+ * Upload adapters used before Buffer dispatch.
  *
- * Ablauf pro Video:
- *   1. Browser fragt /api/upload nach einem eingeschränkten Client-Token
- *      (Blob-Client-Protokoll, Pfad-Guard shortsfactory/*, nur MP4/WebM,
- *      max 2 GB, addRandomSuffix).
- *   2. Browser lädt die Datei mit diesem Token DIREKT zu Vercel Blob hoch
- *      (PUT https://vercel.com/api/blob) — das Read/Write-Token berührt den
- *      Upload nicht und verlässt Server bzw. eigenen Browser nie.
- *   3. Vercel liefert die permanente öffentliche URL zurück; die bekommt Buffer.
- *
- * Das Read/Write-Token kommt entweder aus der Server-Umgebung
- * (BLOB_READ_WRITE_TOKEN, automatisch injiziert via Storage → Connect) oder
- * wurde einmal im Versandfenster eingefügt — dann liegt es nur im
- * localStorage dieses Browsers (selbes Modell wie die AI-Keys).
+ * Buffer only accepts stable public media URLs. R2 and B2 receive the Blob
+ * directly from the browser through a short-lived, server-signed PUT URL.
+ * Puter.js receives it in the browser and returns a readable public URL. The
+ * Vercel function never receives video bytes and Vercel Blob is not involved.
  */
+import { authHeaders } from './auth.ts';
 
-export type UploadProvider = 'vblob';
+export type UploadProvider = 'r2' | 'b2' | 'puter';
+
+export interface ProviderStatus {
+  provider: UploadProvider;
+  label: string;
+  description: string;
+  setupUrl: string;
+  mode: 'server' | 'browser';
+  configured: boolean;
+}
 
 export interface UploadHostStatus {
   configured: boolean;
-  provider?: UploadProvider | null;
+  provider: UploadProvider;
+  providers: Record<UploadProvider, ProviderStatus>;
 }
 
 export interface UploadProgress {
@@ -29,131 +30,97 @@ export interface UploadProgress {
   total: number;
 }
 
-const BLOB_TOKEN_KEY = 'shortsfactory.blob_token.v1';
-const BLOB_API = 'https://vercel.com/api/blob'; // Vercel Blob store router
-const API_VERSION = '11'; // wire version of the client-upload protocol
+const PROVIDER_KEY = 'shortsfactory.upload_provider.v1';
+const PUTER_SCRIPT = 'https://js.puter.com/v2/';
 
-/** Token pasted once in the app; stored in this browser's localStorage only. */
-export function loadBlobToken(): string | null {
+type PuterApi = {
+  fs: {
+    write: (path: string, data: Blob) => Promise<{ path?: string } | void>;
+    mkdir?: (path: string) => Promise<unknown>;
+    getReadURL: (path: string) => Promise<string>;
+  };
+};
+
+declare global {
+  interface Window {
+    puter?: PuterApi;
+  }
+}
+
+export function loadUploadProvider(): UploadProvider {
   try {
-    const token = String(localStorage.getItem(BLOB_TOKEN_KEY) || '').trim();
-    return token || null;
-  } catch { /* private mode */ }
-  return null;
+    const value = localStorage.getItem(PROVIDER_KEY);
+    return value === 'r2' || value === 'b2' || value === 'puter' ? value : 'puter';
+  } catch {
+    return 'puter';
+  }
 }
 
-export function saveBlobToken(token: string) {
-  try { localStorage.setItem(BLOB_TOKEN_KEY, token.trim()); } catch { /* private mode */ }
+export function saveUploadProvider(provider: UploadProvider) {
+  try { localStorage.setItem(PROVIDER_KEY, provider); } catch { /* private mode */ }
 }
 
-export function clearBlobToken() {
-  try { localStorage.removeItem(BLOB_TOKEN_KEY); } catch { /* private mode */ }
+export function providerLabel(provider: UploadProvider): string {
+  return provider === 'r2' ? 'Cloudflare R2' : provider === 'b2' ? 'Backblaze B2' : 'Puter.js';
 }
 
 export async function fetchUploadStatus(signal?: AbortSignal): Promise<UploadHostStatus> {
-  const res = await fetch('/api/upload', { signal });
-  if (!res.ok) throw new Error('Upload-Backend nicht erreichbar.');
-  const data = await res.json();
+  const res = await fetch('/api/upload', { signal, cache: 'no-store', headers: authHeaders() });
+  const data = await res.json().catch(() => null);
+  if (!res.ok || !data) throw new Error(data?.error || 'Upload-Backend nicht erreichbar.');
   return {
-    configured: Boolean(data?.configured),
-    provider: data?.provider === 'vblob' ? 'vblob' : null,
+    configured: Boolean(data.configured),
+    provider: data.provider === 'r2' || data.provider === 'b2' || data.provider === 'puter' ? data.provider : 'puter',
+    providers: data.providers as Record<UploadProvider, ProviderStatus>,
   };
 }
 
-async function postAction(
-  payload: Record<string, unknown>,
-  signal?: AbortSignal,
-  blobToken?: string | null
-): Promise<{ ok?: boolean; clientToken?: string; error?: string }> {
-  let res: Response;
+async function prepareUpload(
+  provider: UploadProvider,
+  opts: { filename: string; contentType: string; size: number },
+  signal?: AbortSignal
+): Promise<Record<string, unknown>> {
+  let response: Response;
   try {
-    res = await fetch('/api/upload', {
+    response = await fetch('/api/upload', {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...(blobToken ? { 'x-sf-blob-token': blobToken } : {}),
-      },
-      body: JSON.stringify(payload),
+      headers: { 'Content-Type': 'application/json', ...authHeaders() },
+      body: JSON.stringify({ action: 'prepare', provider, ...opts }),
       signal,
     });
   } catch {
-    throw new Error('Upload-Host nicht erreichbar.');
+    throw new Error('Upload-Backend nicht erreichbar.');
   }
-  const data = await res.json().catch(() => null);
-  if (!res.ok || !data || data.error) {
-    throw new Error(data?.error || `Upload-Anfrage fehlgeschlagen (HTTP ${res.status}).`);
+  const data = await response.json().catch(() => null);
+  if (!response.ok || !data || data.error) {
+    throw new Error(data?.error || `Upload-Vorbereitung fehlgeschlagen (HTTP ${response.status}).`);
   }
-  return data;
+  return data as Record<string, unknown>;
 }
 
-/** Token check for the in-app connect form — creates or changes nothing. */
-export async function checkBlobToken(token: string, signal?: AbortSignal): Promise<{ ok: boolean; error?: string }> {
-  const result = await postAction({ action: 'vblob-check', blobToken: token }, signal, token);
-  return { ok: Boolean(result?.ok), error: result?.error };
-}
-
-/** Flat, collision-safe Vercel-Blob path inside the app lane: shortsfactory/<stamp>-<rand>-<file>. */
-function buildBlobPathname(filename: string): string {
-  const base = String(filename || '').split(/[\\/]/).pop()!.trim();
-  const cleaned = base.replace(/[^\w.\- ]+/g, '_').replace(/\.{2,}/g, '_').replace(/^\.+/, '').replace(/\s+/g, '-').slice(0, 80);
-  const safe = cleaned && /\.\w{2,5}$/.test(cleaned) ? cleaned : `${cleaned || 'video'}.mp4`;
-  const stamp = new Date().toISOString().replace(/[:-]|\.\d{3}/g, ''); // YYYYMMDDTHHMMSSZ
-  const rand = Math.random().toString(16).slice(2, 10).padEnd(8, '0');
-  return `shortsfactory/${stamp}-${rand}-${safe}`;
-}
-
-/** Plain-language errors out of Vercel Blob's JSON error shape (German operator UI). */
-function blobErrorText(status: number, bodyText: string): string {
-  let code = '';
-  try { code = JSON.parse(bodyText)?.error?.code || ''; } catch { /* not JSON */ }
-  if (status === 401 || status === 403 || code === 'unauthorized' || code === 'forbidden') {
-    return 'Vercel Blob hat den Upload abgelehnt — Token ungültig oder abgelaufen. Bitte Vercel Blob im Versandfenster neu verbinden.';
-  }
-  if (status === 404 || status === 410 || code === 'not_found' || code === 'store_not_found') {
-    return 'Der Blob-Store wurde nicht gefunden oder ist pausiert — bitte im Vercel-Dashboard prüfen.';
-  }
-  if (code === 'file_too_large') return 'Die Datei ist zu groß (Limit dieser App: 2 GB).';
-  if (code === 'content_type_not_allowed') return 'Nur MP4- oder WebM-Videos sind erlaubt.';
-  if (code === 'client_token_expired') return 'Das Upload-Token ist abgelaufen — bitte erneut versuchen.';
-  if (status >= 500 || code === 'service_unavailable' || code === 'internal_server_error') {
-    return 'Vercel Blob meldet einen Serverfehler — bitte später erneut versuchen.';
-  }
-  return `Vercel Blob hat HTTP ${status} gemeldet${code ? ` (${code})` : ''}.`;
-}
-
-/**
- * Step 2 of the Vercel-Blob path: PUT the file browser-direct with the client
- * token (XHR so progress stays measurable), resolve with the permanent URL.
- */
-function putToVercelBlob(
-  pathname: string,
-  clientToken: string,
+function putToSignedUrl(
+  uploadUrl: string,
   file: Blob,
   contentType: string,
   signal: AbortSignal | undefined,
-  onProgress?: (p: UploadProgress) => void
-): Promise<string> {
+  onProgress?: (progress: UploadProgress) => void
+): Promise<void> {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
-    xhr.open('PUT', `${BLOB_API}/?pathname=${encodeURIComponent(pathname)}`);
-    xhr.setRequestHeader('authorization', `Bearer ${clientToken}`);
-    xhr.setRequestHeader('x-api-version', API_VERSION);
-    xhr.setRequestHeader('x-content-type', contentType);
-    xhr.upload.onprogress = (e) => {
-      if (e.lengthComputable) onProgress?.({ loaded: e.loaded, total: e.total });
+    xhr.open('PUT', uploadUrl);
+    xhr.setRequestHeader('Content-Type', contentType);
+    xhr.upload.onprogress = event => {
+      if (event.lengthComputable) onProgress?.({ loaded: event.loaded, total: event.total });
     };
     xhr.onload = () => {
       if (xhr.status >= 200 && xhr.status < 300) {
-        try {
-          const data = JSON.parse(xhr.responseText || '{}');
-          if (typeof data.url === 'string' && data.url) { resolve(data.url); return; }
-        } catch { /* fall through */ }
-        reject(new Error('Vercel Blob hat keine öffentliche Adresse gemeldet.'));
-        return;
+        onProgress?.({ loaded: file.size, total: file.size });
+        resolve();
+      } else {
+        reject(new Error(`Der Upload-Provider hat HTTP ${xhr.status} gemeldet.`));
       }
-      reject(new Error(blobErrorText(xhr.status, xhr.responseText || '')));
     };
-    xhr.onerror = () => reject(new Error('Upload fehlgeschlagen — Vercel Blob ist vom Browser aus nicht erreichbar (Netzwerk/CORS).'));
+    xhr.onerror = () => reject(new Error('Direkter Upload fehlgeschlagen. Prüfe Bucket-CORS und die öffentliche Domain des Providers.'));
     xhr.onabort = () => reject(new DOMException('Upload abgebrochen.', 'AbortError'));
     const onAbort = () => xhr.abort();
     signal?.addEventListener('abort', onAbort, { once: true });
@@ -162,56 +129,81 @@ function putToVercelBlob(
   });
 }
 
-/**
- * The whole Vercel-Blob path for one rendered video: ask /api/upload for a
- * constrained client token, PUT browser-direct, resolve with the permanent
- * public URL. The upload must fully succeed before anything is sent to Buffer.
- */
-export async function uploadViaVercelBlob(
-  file: Blob,
-  opts: {
-    filename: string;
-    contentType: string;
-    signal?: AbortSignal;
-    onProgress?: (progress: UploadProgress) => void;
+let puterLoad: Promise<PuterApi> | null = null;
+
+async function loadPuter(): Promise<PuterApi> {
+  if (window.puter) return window.puter;
+  if (!puterLoad) {
+    puterLoad = new Promise<PuterApi>((resolve, reject) => {
+      const existing = document.querySelector<HTMLScriptElement>(`script[src="${PUTER_SCRIPT}"]`);
+      const script = existing || document.createElement('script');
+      const done = () => window.puter ? resolve(window.puter) : reject(new Error('Puter.js wurde geladen, aber die API fehlt.'));
+      const fail = () => reject(new Error('Puter.js konnte nicht geladen werden.'));
+      script.addEventListener('load', done, { once: true });
+      script.addEventListener('error', fail, { once: true });
+      if (!existing) {
+        script.src = PUTER_SCRIPT;
+        script.async = true;
+        document.head.appendChild(script);
+      } else if (window.puter) {
+        done();
+      }
+    }).catch(error => {
+      puterLoad = null;
+      throw error;
+    });
   }
-): Promise<string> {
-  const blobToken = loadBlobToken();
-  const pathname = buildBlobPathname(opts.filename);
-  const { clientToken } = await postAction(
-    { type: 'blob.generate-client-token', payload: { pathname, clientPayload: null, multipart: false } },
-    opts.signal,
-    blobToken
-  );
-  if (!clientToken || !clientToken.startsWith('vercel_blob_client_')) {
-    throw new Error('Upload-Host hat kein gültiges Upload-Token geliefert.');
-  }
-  try {
-    // Exactly the pathname the token was issued for — Vercel rejects mismatches.
-    return await putToVercelBlob(pathname, clientToken, file, opts.contentType.toLowerCase(), opts.signal, opts.onProgress);
-  } catch (e) {
-    const message = e instanceof Error ? e.message : String(e);
-    throw new Error(`${message} Es wurde noch nichts an Buffer gesendet.`);
-  }
+  return puterLoad;
 }
 
-/**
- * Upload one rendered video — Vercel Blob only. Resolves with the permanent
- * public URL. Throws a clear German error when nothing is connected.
- */
+async function uploadToPuter(
+  file: Blob,
+  opts: { filename: string; signal?: AbortSignal; onProgress?: (progress: UploadProgress) => void }
+): Promise<string> {
+  if (opts.signal?.aborted) throw new DOMException('Upload abgebrochen.', 'AbortError');
+  const data = await prepareUpload('puter', { filename: opts.filename, contentType: file.type || 'video/mp4', size: file.size }, opts.signal);
+  const key = String(data.key || '');
+  if (!key) throw new Error('Puter-Pfad fehlt.');
+  const puter = await loadPuter();
+  // Puter paths are user files; create the lane if this is the first upload.
+  if (puter.fs.mkdir) await puter.fs.mkdir('shortsfactory').catch(() => undefined);
+  opts.onProgress?.({ loaded: 0, total: file.size });
+  const saved = await puter.fs.write(key, file);
+  if (opts.signal?.aborted) throw new DOMException('Upload abgebrochen.', 'AbortError');
+  const publicUrl = await puter.fs.getReadURL(String(saved && typeof saved === 'object' && saved.path ? saved.path : key));
+  if (!publicUrl || !/^https:\/\//i.test(publicUrl)) throw new Error('Puter hat keine öffentliche HTTPS-Adresse geliefert.');
+  opts.onProgress?.({ loaded: file.size, total: file.size });
+  return publicUrl;
+}
+
+/** Upload one rendered video and return the permanent public URL for Buffer. */
 export async function uploadRenderFile(
   file: Blob,
   opts: {
+    provider: UploadProvider;
     filename: string;
     contentType: string;
     signal?: AbortSignal;
     onProgress?: (progress: UploadProgress) => void;
   }
 ): Promise<string> {
-  if (!loadBlobToken()) {
-    // No in-app token → only the server env can still be connected.
-    const status = await fetchUploadStatus(opts.signal).catch(() => null);
-    if (!status?.configured) throw new Error('Bitte erst Vercel Blob im Versandfenster verbinden.');
+  if (opts.provider === 'puter') {
+    return uploadToPuter(file, { filename: opts.filename, signal: opts.signal, onProgress: opts.onProgress });
   }
-  return uploadViaVercelBlob(file, opts);
+
+  const data = await prepareUpload(opts.provider, {
+    filename: opts.filename,
+    contentType: opts.contentType.split(';', 1)[0].toLowerCase() || 'video/mp4',
+    size: file.size,
+  }, opts.signal);
+  const uploadUrl = String(data.uploadUrl || '');
+  const publicUrl = String(data.publicUrl || '');
+  if (!uploadUrl || !publicUrl) throw new Error(`${providerLabel(opts.provider)} hat keine Upload-/Public-URL geliefert.`);
+  try {
+    await putToSignedUrl(uploadUrl, file, String(data.contentType || opts.contentType), opts.signal, opts.onProgress);
+    return publicUrl;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`${message} Es wurde noch nichts an Buffer gesendet.`);
+  }
 }

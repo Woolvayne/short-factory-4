@@ -21,7 +21,7 @@ Optimised for desktop **and** iPhone / iPad (iOS 17+ recommended).
 4. **Alle posten — ein Klick** — the big **ALLE N VIDEOS AUF EINMAL POSTEN**
    button in the Output Bay opens the dispatch window with everything
    preselected. One confirmation press: every finished video is uploaded to
-   your connected Vercel Blob store and then handed to Buffer
+   your selected R2, B2 or Puter host and then handed to Buffer
    **one after another with a short pause**, so all ten reliably go through.
 
 ## Clip Mill — one source → ten clips
@@ -81,92 +81,69 @@ insbesondere werden alte simulierte IDs nicht als echte Buffer-Posts behandelt.
 3. Im Versandfenster oder unter **BUFFER KANÄLE** auf **Kanäle laden /
    Verbindung prüfen** klicken und TikTok, Instagram und/oder YouTube auswählen.
    Alternativ echte **Buffer-Kanal-IDs** eintragen, nicht native Plattform-IDs.
-4. **Deployment vor öffentlichem Zugriff schützen** (z. B. Vercel Deployment
-   Protection oder ein authentifizierter Reverse Proxy). Diese persönliche
-   Operator-App hat keine eigene Benutzerverwaltung; der geheime serverseitige
-   Key allein ist keine Zugriffskontrolle für die API-Routen.
+4. `SHORTSFACTORY_PASSWORD` als **Server-Umgebungsvariable** setzen (siehe
+   Passwortschutz unten). Das eingebaute Gate schützt die Oberfläche und die
+   API-Routen; für eine zusätzliche Unternehmensschicht kann optional Vercel
+   Deployment Protection oder ein authentifizierter Reverse Proxy davorliegen.
 
 Ohne Key wird der Versand ausdrücklich abgelehnt. Kein Simulationsmodus,
 keine erfundenen Post-IDs und keine falschen Erfolgsmeldungen.
 
-Ohne Key wird der Versand ausdrücklich abgelehnt. Kein Simulationsmodus,
-keine erfundenen Post-IDs und keine falschen Erfolgsmeldungen.
+### Upload-Host — drei Wege ohne Vercel Blob
 
-### Upload-Host — einmal einrichten, nie wieder Links eintippen
+Buffer akzeptiert **keine direkten Datei-Uploads per API**. Es gibt keinen
+`Buffer`-Endpoint, an den die App einen Node- oder Browser-`Buffer` senden kann.
+Stattdessen muss Buffer eine **direkte, öffentliche, dauerhafte HTTPS-Datei-URL**
+bekommen. Die App lädt deshalb jedes fertige Video vor dem Versand direkt zu
+einem von drei auswählbaren Hosts hoch und übergibt erst danach die URL an
+Buffer. Das vermeidet den Vercel-Blob-Engpass; Vercel bekommt dabei keine
+Videobytes.
 
-Buffer akzeptiert **keine direkten Datei-Uploads per API**, sondern benötigt
-öffentlich abrufbare Medien-URLs. Der Mittelweg dafür ist **Vercel Blob** als
-Upload-Host — der **einzige** von dieser App unterstützte Weg. Er wird **genau
-einmal** verbunden; danach lädt die App jedes fertig gerenderte Video selbst
-hoch und übergibt Buffer den dauerhaften öffentlichen Link — **kein manuelles
-Eintippen von Links mehr**.
+Die drei Adapter sind im Versandfenster auswählbar:
 
-#### Vercel Blob — der eine Upload-Host
+| Provider | Einschätzung für mindestens 100 GB/Monat | Einrichtung |
+| --- | --- | --- |
+| **Cloudflare R2** (Empfehlung) | Bucket-Speicher ist laut Limits unbegrenzt, Egress ins Internet kostenlos. Es gibt keinen 100-GB-Transferdeckel; Storage und Requests werden verbrauchsabhängig berechnet. | Server-Env + öffentlicher Custom-Domain-Bucket |
+| **Backblaze B2** | S3-kompatibel, `3×` des durchschnittlich gespeicherten Volumens Egress pro Monat kostenlos, darüber `0,01 USD/GB` (oder CDN-Partner nutzen). Bei z. B. 100 GB gespeichert sind 300 GB/Monat abgedeckt. | Server-Env + öffentlicher Bucket/CDN |
+| **Puter.js** (dein „Putter“) | Browser-Upload ohne Server-Key; Puter bewirbt kostenlosen/unbegrenzten Object Storage und ein User-Pays-Modell. Die Nutzungsseite nennt aber monatliche Freikontingente/Upgrades und keine harte 100-GB-SLA. Daher bequem, aber nicht meine belastbare Produktionsgarantie für 100 GB. | Kein Env-Key; beim ersten Upload Puter anmelden |
 
-[Vercel Blob](https://vercel.com/docs/storage/vercel-blob) ist Vercels
-Dateispeicher mit CDN: Die Videos liegen dauerhaft unter einer öffentlichen
-Adresse `https://<store>.public.blob.vercel-storage.com/…` — genau der
-permanente Link, den Buffer braucht. Der Ablauf pro Video: Der Browser holt
-sich von `/api/upload` ein **kurzlebiges, eingeschränktes Upload-Token**
-(Pfad-Guard `shortsfactory/*`, nur MP4/WebM, max. 2 GB, zufälliger Suffix) und
-lädt die Datei damit **direkt** zu Vercel Blob hoch. Das geheime
-Read/Write-Token berührt den Upload nicht; die Videos laufen nie durch den
-App-Server. Kein CORS-Setup, kein Bucket-Setup, keine Signaturen, die ablaufen.
+**Meine Empfehlung:** R2 als Standard für regelmäßige Produktion, B2 als
+preiswerte Ausweich- oder Archivoption, Puter für einen einzelnen Operator,
+der keine S3-Credentials verwalten möchte. R2 ist die einzige der drei
+Varianten mit klar unbegrenztem Bucket-Limit und ohne Egress-Preis. Kein
+Provider kann Buffer-Posts retten, wenn die Datei später gelöscht wird: Die
+öffentliche URL muss bis zur Veröffentlichung bestehen bleiben.
 
-Einmalige Einrichtung — **zwei Wege, einer genügt:**
+Weitere Details, Variablen und CORS-Beispiele stehen in
+[`docs/storage-providers.md`](docs/storage-providers.md). Kurz gesagt:
 
-1. **Serverseitig (empfohlen auf Vercel):**
-   [vercel.com](https://vercel.com) → Projekt → **Storage → Blob → Create
-   Database/Store** → Store ans Projekt **„Connect“** hängen. Vercel injiziert
-   `BLOB_READ_WRITE_TOKEN` dann **automatisch** als Umgebungsvariable
-   (danach einmal **Redeploy**). Alternativ die Variable von Hand setzen:
-   **Storage → Blob → .env.local**-Tab zeigt das Token; lokal in `.env.local`
-   eintragen und `npm run dev` neu starten. Kein `VITE_`-Präfix!
-2. **In der App (ohne Env, ohne Redeploy):** Versandfenster öffnen (**ALLE N
-   VIDEOS AUF EINMAL POSTEN**) → **Read/Write-Token einfügen** → **Vercel Blob
-   verbinden**. Die App prüft das Token direkt bei Vercel und speichert es
-   **nur in diesem Browser** (localStorage, genau wie die AI-Keys).
+1. R2 oder B2 als **public-read Bucket bzw. öffentliche Custom Domain**
+   einrichten; für Browser-PUT zusätzlich CORS für die App-Origin erlauben.
+2. Die Provider-Variablen aus `.env.example` in `.env.local` bzw. in Vercel
+   eintragen. Geheimnisse nie mit `VITE_` prefixen.
+3. Neu starten bzw. redeployen, Versandfenster öffnen und den Provider-Card
+   auswählen. Puter lädt bei der ersten Verwendung `https://js.puter.com/v2/`
+   und startet den Login.
+4. Die erzeugte URL in einem privaten Browserfenster öffnen. Sie muss das
+   MP4/WebM direkt ohne Login, Preview-Seite oder ablaufende Signatur liefern.
 
-Ist beides gesetzt, gewinnt das serverseitige Token. Getrennt wird die
-In-App-Verbindung jederzeit über **„Verbindung trennen“** im Versandfenster.
+R2/B2 nutzen eine **15 Minuten gültige Presigned-PUT-URL nur für den Upload**;
+diese URL wird niemals an Buffer gesendet. Buffer erhält anschließend die
+stabile `R2_PUBLIC_BASE_URL` bzw. `B2_PUBLIC_BASE_URL`. Puter liefert seine
+öffentliche `getReadURL`-Adresse direkt aus dem Browser.
 
-**Kostenrahmen und Grenzen (Hobby / Free Tier):**
+### Passwortschutz
 
-* **1 GB Speicher** und **10 GB Datentransfer pro Monat** kostenlos —
-  bei ~10 Shorts à 10–30 MB pro Woche ausreichend, **wenn regelmäßig
-  aufgeräumt wird** (siehe unten).
-* Der **Hobby-Plan ist nur für nicht-kommerzielle Projekte** gedacht. Wer
-  kommerziell arbeitet oder mehr Speicher braucht, braucht einen bezahlten
-  Vercel-Plan (Blob wird dann verbrauchsbasiert abgerechnet).
-* Pro Video max. **2 GB** (App-Limit); jeder Upload bekommt einen
-  Zufalls-Suffix — es wird nie etwas überschrieben und keine alte Datei
-  ersetzt.
+Setze serverseitig `SHORTSFACTORY_PASSWORD` in `.env.local` oder in den Vercel
+Project Settings und redeploye. **Kein `VITE_`-Präfix.** Dann zeigt die App vor
+jeder Produktion eine Passwortseite; nach einem vollständigen Reload ist die
+Eingabe erneut erforderlich. Das Passwort landet weder in `localStorage`,
+`sessionStorage`, Cookies, URLs noch im Bundle. Die API-Routen für TTS, Upload
+und Buffer prüfen zusätzlich den same-origin Header serverseitig.
 
-**Aufräumen (wichtig bei 1 GB):** Alte Renders regelmäßig im Dashboard löschen
-(Storage → Blob → Store → Dateien auswählen → Delete), sonst ist das
-Gigabyte irgendwann voll. Dateien zu bereits veröffentlichten Posts können
-drin bleiben — sie stören nicht, verbrauchen aber Speicher. Ein automatisches
-Aufräumen gibt es nicht.
-
-**Kurz-Troubleshooting:**
-
-| Symptom | Ursache / Fix |
-| --- | --- |
-| Versandfenster zeigt weiter „Vercel Blob ist noch nicht verbunden“ | Env-Var fehlt im Prozess — nach `.env.local`-Änderung dev-Server neu starten; auf Vercel nach „Connect“ neu deployen. Oder In-App-Token einfügen |
-| „Token abgelehnt“ beim Verbinden | Token ist kein gültiges/aktuelles Read/Write-Token — frisch aus Storage → Blob → .env.local kopieren (Format `vercel_blob_rw_…`) |
-| „Store nicht gefunden oder pausiert“ | Store wurde gelöscht/umbenannt oder das Projekt ist entkoppelt — Storage im Dashboard prüfen, Store neu verbinden |
-| Upload bricht mit Serverfehler/Timeout ab | Vercel Blob kurzzeitig gestört — Status unter vercel-status.com prüfen, später erneut senden; es wurde nichts an Buffer übergeben |
-| „1 GB voll“ / Uploads schlagen mit Kontingentfehler fehl | Alte Videos im Store löschen (siehe Aufräumen) oder Plan erweitern |
-| Upload ok, aber Buffer meldet Medienfehler | Öffentliche Adresse in einem privaten Browserfenster testen — sie muss das Video direkt ausliefern |
-
-**Zur Sicherheit:** Bei der Env-Variante bleibt das Token komplett
-serverseitig; bei der In-App-Variante liegt es im localStorage dieses Browsers
-und wird je Anfrage an die eigene Same-Origin-Route geschickt (niemals in
-Antworten zurückgegeben, niemals an Dritte). Das ist dasselbe Modell wie die
-AI-Keys dieser App — vorausgesetzt, das Deployment steht hinter
-Zugriffsschutz (siehe oben). Das im Browser genutzte Client-Token ist
-kurzlebig (1 Stunde) und auf `shortsfactory/*`, MP4/WebM und 2 GB
-eingeschränkt.
+Wenn `SHORTSFACTORY_PASSWORD` leer ist, bleibt die lokale Entwicklung offen.
+Für eine öffentliche Bereitstellung sollte es gesetzt sein; `BUFFER_API_KEY`
+und die S3-Schlüssel bleiben trotzdem ausschließlich Server-Variablen.
 
 ### Der Ein-Klick-Versand (alle 10 auf einmal)
 
@@ -174,8 +151,8 @@ eingeschränkt.
 vorausgewählt: alle fertigen Videos markiert, Kanäle, Beschreibung und Modus
 aus der letzten Einrichtung übernommen. Ein Startdruck führt dann aus:
 
-1. **Upload-Phase** — jedes ausgewählte Video wird nacheinander zu Vercel Blob
-   übertragen (Fortschrittsbalken je Video). Schlägt ein Upload
+1. **Upload-Phase** — jedes ausgewählte Video wird nacheinander zum ausgewählten
+   R2-, B2- oder Puter-Host übertragen (Fortschrittsbalken je Video). Schlägt ein Upload
    fehl oder wird abgebrochen, wurde **noch nichts an Buffer gesendet**.
 2. **Versand-Phase** — die Posts gehen wie gewohnt **sequenziell mit kurzer
    Pause** (Standard 3 Sekunden nach jeder Buffer-Antwort, einstellbar
@@ -186,15 +163,15 @@ Bereits hochgeladene Videos werden wiederverwendet (kein Doppel-Upload);
 pro Video gibt es „Erneut hochladen“, um bewusst einen neuen Link zu erzeugen.
 Sendet das Journal bereits nicht fehlgeschlagene Posts mit denselben Titeln,
 verlangt das Fenster eine zusätzliche Bestätigung gegen versehentliche
-Doppelposts. Ohne verbundenen Vercel-Blob-Store zeigt das Fenster den
-Verbinden-Dialog — ein manuelles Eintragen von Links gibt es nicht mehr.
+Doppelposts. Ohne eingerichteten Provider zeigt das Fenster die fehlende Einrichtung an —
+ein manuelles Eintragen von Links ist nicht nötig.
 
 Jedes ausgewählte Video wird **genau einmal pro ausgewähltem Kanal** gesendet,
 keine Rotation und kein Auffüllen eines einzelnen Videos auf zehn Posts.
 Buffer bzw. die jeweilige Plattform prüft Medienformat/-größe/-dauer; MP4 mit
 H.264/AAC ist zu bevorzugen. Der lokale Renderer verwendet MP4, wenn der Browser
-es unterstützt, andernfalls WebM — beides lädt die App direkt zu Vercel Blob
-hoch. Die App prüft die gelieferten Upload-Adressen, garantiert aber keine
+es unterstützt, andernfalls WebM — beides lädt die App direkt zum gewählten
+Provider hoch. Die App prüft die gelieferten Upload-Adressen, garantiert aber keine
 externe Erreichbarkeit oder plattformübergreifende Medienkompatibilität.
 
 | Modus | Verhalten |
@@ -267,7 +244,10 @@ gewählte Animation enthalten. Kein Referenz-Anhang lag bei der Umsetzung vor.
 - [ShareMode](https://developers.buffer.com/types/ShareMode.html)
 - [YouTube-Metadaten](https://developers.buffer.com/types/YoutubePostMetadataInput.html)
 - [Instagram-Metadaten](https://developers.buffer.com/types/InstagramPostMetadataInput.html)
-- [Vercel Blob](https://vercel.com/docs/storage/vercel-blob) · [Client uploads](https://vercel.com/docs/storage/vercel-blob/client-upload) (Upload-Host)
+- [Cloudflare R2 Limits](https://developers.cloudflare.com/r2/platform/limits/) · [Pricing](https://developers.cloudflare.com/r2/pricing/)
+- [Backblaze B2 Pricing](https://www.backblaze.com/cloud-storage/pricing) · [S3-compatible API](https://www.backblaze.com/docs/cloud-storage-s3-compatible-api)
+- [Puter Cloud Storage](https://docs.puter.com/FS/) · [User-Pays Model](https://docs.puter.com/user-pays-model/)
+- [Storage setup guide](docs/storage-providers.md)
 
 ## Lokaler Asset-Speicher
 
@@ -323,8 +303,8 @@ Same origin → no CORS, no apikey, no Supabase anon key, no configuration.
 | Captions | WordBoundary timestamps grouped into N-word cues, drawn on canvas |
 | Rendering | Canvas 2D + WebAudio graph + MediaRecorder, real-time capture, MP4/H.264 on Safari with automatic WebM fallback |
 | ZIP | JSZip (STORE) → blob anchor, fully local |
-| Your files | Sources and renders stay local; finished renders go straight from the browser into your Vercel Blob store |
-| Upload host | Browser → `/api/upload` (Vercel-Blob client token, constrained to `shortsfactory/*`) → direct browser PUT to Vercel Blob; permanent public URL comes back for Buffer |
+| Your files | Sources and renders stay local; finished renders go straight from the browser into the selected R2, B2 or Puter host |
+| Upload host | Browser → `/api/upload` (server-signed S3 PUT for R2/B2, or Puter.js) → provider; permanent public URL comes back for Buffer |
 | Buffer | Browser → `/api/buffer` → `https://api.buffer.com` GraphQL; key stays server-side |
 
 Rendering is real-time: a 40-second voice takes ~40 seconds per unit, and the
@@ -342,14 +322,15 @@ src/
 │  ├─ IdeasPanel.tsx           the 10 numbered inputs
 │  ├─ ClipMill.tsx             1-source slicing + link intake + 10-file mode
 │  ├─ Uploaders.tsx            soundtrack deck
-│  └─ MissionControl.tsx       prepare/render buttons · unit cards · ZIP bay
+│  ├─ MissionControl.tsx       prepare/render buttons · unit cards · ZIP bay
+│  └─ PasswordGate.tsx          page-scoped password gate
 └─ lib/
    ├─ settings.ts   llm.ts   tts.ts   renderer.ts   clips.ts   media.ts   types.ts
 
-api/        ← TTS + Buffer relays (Vercel Serverless Functions, Node.js)
+api/        ← auth, TTS, Buffer relay + provider presign (Vercel Node.js Functions)
 shared/     ← public URL validation + Buffer payload building
 server/     ← same-origin API middleware for local Vite development
-tests/      ← Buffer relay, dispatch, scheduling, upload client-token and intro regression tests
+tests/      ← Buffer relay, dispatch, scheduling, provider presign and intro regression tests
 supabase/   ← inert legacy v1 (hosted Edge Functions + Shotstack), unused
 ```
 

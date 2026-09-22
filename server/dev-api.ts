@@ -4,6 +4,7 @@ import { pathToFileURL } from 'node:url';
 import path from 'node:path';
 
 const API_MODULES: Record<string, string> = {
+  '/api/auth': 'api/auth.js',
   '/api/buffer': 'api/buffer.js',
   '/api/upload': 'api/upload.js',
   '/api/tts': 'api/tts.js',
