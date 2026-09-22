@@ -8,6 +8,25 @@ neural voice and word-synced captions — then press **Render**.
 
 Optimised for desktop **and** iPhone / iPad (iOS 17+ recommended).
 
+## iPad & Touch
+
+Die Oberfläche ist für iPad-Viewport (768–1366 px, Hoch- und Querformat)
+nachgeschärft:
+
+- **Zwei-Spalten-Factory ab 768 px** — Settings + Titles links, Clip Mill +
+  Soundtrack + Assembly rechts; auf dem iPad kein langes Einzel-Spalt-Scrolling mehr.
+- **Output Bay & Kalender** bekommen Tablet-Großen statt Desktop-Großen:
+  3 Spalten pro Reihe (statt 2 riesiger 9:16-Videos), Kalender in Woche = 2
+  breite Tag-Karten, Monat = 4 Spalten; die 7er-Gitter bleiben dem Desktop.
+- **Kein Header-Überlauf** auf iPad-Hochformat: die Status-LEDs rücken erst ab
+  1024 px nach; die Navigation bekommt 36 px + Tap-Fläche.
+- **Touch-Targets** ≥ 36 px (Icons ≥ 40 px) auf allen Coarse-Pointer-Geräten,
+  16 px Input-Fonts gegen iOS-Focus-Zoom, `touch-action: manipulation` gegen
+  den Double-Tap-Zoom, Safe-Area-Gutter für Landscape-Homescreen und
+  Home-Indicator (`viewport-fit=cover`).
+- **Performance**: Intro-Preview auf ~24 fps gedrosselt und im Hintergrund
+  pausiert; Grain-Overlay auf Viewport-Größe verkleinert.
+
 ## The three-button flow
 
 1. **① Prepare 10 scripts + voices** — fast step, writes every story and
@@ -143,7 +162,7 @@ und Buffer prüfen zusätzlich den same-origin Header serverseitig.
 
 Wenn `SHORTSFACTORY_PASSWORD` leer ist, bleibt die lokale Entwicklung offen.
 Für eine öffentliche Bereitstellung sollte es gesetzt sein; `BUFFER_API_KEY`
-und die S3-Schlüssel bleiben trotzdem ausschließlich Server-Variablen.
+bleibt trotzdem ausschließlich eine Server-Variable.
 
 ### Der Ein-Klick-Versand (alle 10 auf einmal)
 
@@ -330,7 +349,6 @@ api/        ← auth, TTS, Buffer relay + OnlyFiles upload config (Vercel Node.j
 shared/     ← public URL validation + Buffer payload building
 server/     ← same-origin API middleware for local Vite development
 tests/      ← Buffer relay, dispatch, scheduling, upload verification and intro regression tests
-supabase/   ← inert legacy v1 (hosted Edge Functions + Shotstack), unused
 ```
 
 — Local rendering. Your hosting. Buffer dispatch.

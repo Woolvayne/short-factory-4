@@ -92,7 +92,9 @@ export default function IdeasPanel({
         </div>
       }
     >
-      <div className="grid gap-2.5 md:grid-cols-2">
+      {/* Single column inside the narrow tablet column (md–lg); two columns
+          only where the panel itself is wide enough (desktop). */}
+      <div className="grid gap-2.5 lg:grid-cols-2">
         {ideas.map((idea, i) => {
           const ok = idea.trim().length > 2;
           const thinking = generatingIndex === i || generatingAll;

@@ -76,14 +76,14 @@ export default function Header({
             <button
               type="button"
               onClick={() => onJump("factory")}
-              className="flex items-center gap-1.5 border border-coal-700 bg-coal-850 px-3 py-1.5 font-mono text-[10px] font-bold tracking-widest text-coal-300 transition-colors hover:border-volt-400 hover:text-volt-300"
+              className="flex min-h-[36px] items-center gap-1.5 border border-coal-700 bg-coal-850 px-3 py-1.5 font-mono text-[10px] font-bold tracking-widest text-coal-300 transition-colors hover:border-volt-400 hover:text-volt-300"
             >
               <Factory className="size-3.5" /> Factory
             </button>
             <button
               type="button"
               onClick={() => onJump("calendar")}
-              className="flex items-center gap-1.5 border border-coal-700 bg-coal-850 px-3 py-1.5 font-mono text-[10px] font-bold tracking-widest text-coal-300 transition-colors hover:border-volt-400 hover:text-volt-300"
+              className="flex min-h-[36px] items-center gap-1.5 border border-coal-700 bg-coal-850 px-3 py-1.5 font-mono text-[10px] font-bold tracking-widest text-coal-300 transition-colors hover:border-volt-400 hover:text-volt-300"
             >
               <Calendar className="size-3.5" /> 📅 Kalender
               {scheduledCount > 0 && (
@@ -94,14 +94,16 @@ export default function Header({
             </button>
           </div>
 
+          {/* Status LEDs: from lg up they fit on one line — on iPad portrait
+              the header would otherwise overflow, so they join at desktop. */}
           <div className="flex items-center gap-3 sm:gap-5">
-            <div className="hidden items-center gap-2 sm:flex">
+            <div className="hidden items-center gap-2 lg:flex">
               <Led on={keyed} />
               <span className="mono-label text-[9px] text-coal-300">
                 {keyed ? "AI SCRIPT" : "OFFLINE SCRIPT"}
               </span>
             </div>
-            <div className="hidden items-center gap-2 sm:flex">
+            <div className="hidden items-center gap-2 lg:flex">
               <Led on />
               <span className="mono-label text-[9px] text-coal-300">TTS SOCKET</span>
             </div>
