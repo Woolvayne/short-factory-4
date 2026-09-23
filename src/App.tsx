@@ -798,7 +798,9 @@ export default function App() {
           </span>
         </div>
 
-        <div ref={factoryRef} className="grid gap-5 scroll-mt-24 lg:grid-cols-2">
+        {/* Two-column factory from md (768 px = iPad portrait) so tablets get
+            the desktop-shaped layout instead of one very long column. */}
+        <div ref={factoryRef} className="grid gap-5 scroll-mt-24 md:grid-cols-2">
           <div className="grid content-start gap-5">
             <SettingsPanel settings={settings} onChange={setSettings} disabled={busy} />
             <IdeasPanel

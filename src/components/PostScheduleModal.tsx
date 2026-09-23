@@ -131,7 +131,7 @@ export default function PostScheduleModal({ targetItems, existingPosts, autoStar
     ? Math.min(100, ((uploadDone + (currentUpload ? uploadStateOf(currentUpload.item.index).loaded / Math.max(1, uploadStateOf(currentUpload.item.index).total) : 0)) / uploadTotal) * 100)
     : 0;
 
-  return <div className="fixed inset-0 z-50 overflow-y-auto bg-coal-950/95 p-4" role="dialog" aria-modal="true" aria-labelledby="buffer-title">
+  return <div className="fixed inset-0 z-50 overflow-y-auto bg-coal-950/95 px-4 pt-4 pb-[max(1.5rem,env(safe-area-inset-bottom))]" role="dialog" aria-modal="true" aria-labelledby="buffer-title">
     <div className="card-bracket mx-auto my-6 max-w-4xl border border-coal-600 bg-coal-900 p-5 sm:p-7">
       <div className="flex items-start justify-between gap-3 border-b border-coal-700 pb-4">
         <div><span className="bg-heat px-2 py-1 font-mono text-[10px] font-bold text-coal-950">BUFFER DISPATCH</span>

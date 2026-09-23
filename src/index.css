@@ -167,7 +167,9 @@ body {
   .grain::after {
     content: "";
     position: fixed;
-    inset: -100%;
+    /* Viewport-sized, not 3× viewport: the repeating noise tile looks
+       identical, but a 3× sized fixed layer is wasteful on iPad GPUs. */
+    inset: 0;
     z-index: 60;
     pointer-events: none;
     background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='220' height='220'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.8' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
@@ -500,6 +502,19 @@ div[role="dialog"] {
 
   /* Icon-only buttons stay comfortably tappable. */
   button[class*="p-1"]:not([class*="p-1."]) {
+    min-width: 40px;
+    min-height: 40px;
+  }
+
+  /* iPad/tablet touch baseline: every control without an explicit min-height
+     gets at least 36 px, and small icon buttons at least 40 × 40 px. */
+  button:not([class*="min-h"]):not([class*="size-"]) {
+    min-height: 36px;
+  }
+
+  button.size-6,
+  button.size-7,
+  button.size-8 {
     min-width: 40px;
     min-height: 40px;
   }

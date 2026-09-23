@@ -430,9 +430,9 @@ export default function CalendarView({
           </div>
         </div>
 
-        {/* Weekday header (month grid) */}
+        {/* Weekday header (month grid) — column count follows the month grid. */}
         {viewMode === "month" && (
-          <div className="mt-4 hidden gap-3 border-b border-coal-700/60 pb-2 sm:grid sm:grid-cols-7">
+          <div className="mt-4 hidden gap-3 border-b border-coal-700/60 pb-2 sm:grid sm:grid-cols-4 lg:grid-cols-7">
             {WEEKDAYS_DE.map((day) => (
               <span key={day} className="mono-label text-center text-[8.5px] text-coal-400">
                 {day}
@@ -441,7 +441,9 @@ export default function CalendarView({
           </div>
         )}
 
-        {/* Calendar Grid */}
+        {/* Calendar Grid — on tablets (md) the seven 7-col rows would be
+            ~100 px wide and unreadable, so week = 2 wide day cards, month =
+            4 columns; the full 7-column grid is a desktop (lg) shape. */}
         <div
           onTouchStart={onTouchStart}
           onTouchEnd={onTouchEnd}
@@ -449,9 +451,9 @@ export default function CalendarView({
             "grid gap-3",
             viewMode === "month" ? "mt-4 sm:mt-3" : "mt-4",
             viewMode === "month"
-              ? "grid-cols-1 sm:grid-cols-7"
+              ? "grid-cols-1 sm:grid-cols-4 lg:grid-cols-7"
               : viewMode === "week"
-                ? "grid-cols-1 md:grid-cols-7"
+                ? "grid-cols-1 sm:grid-cols-2 lg:grid-cols-7"
                 : "grid-cols-1"
           )}
         >
@@ -789,7 +791,7 @@ export default function CalendarView({
             </div>
 
             <div className="mt-4"><BufferChannels config={bufferCfg} onChange={setBufferCfg} /></div>
-            <button onClick={() => setShowConfigModal(false)} className="bg-heat mt-5 px-5 py-3 font-bold text-coal-950">Fertig</button>
+            <button onClick={() => setShowConfigModal(false)} className="bg-heat mt-5 flex min-h-[44px] items-center justify-center px-5 py-3 font-bold text-coal-950">Fertig</button>
           </div>
         </div>
       )}

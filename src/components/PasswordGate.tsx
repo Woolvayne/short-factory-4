@@ -65,7 +65,7 @@ export default function PasswordGate({ children }: { children: ReactNode }) {
         </label>
         {message && <p role="alert" className="font-mono text-xs text-rose-err">{message}</p>}
         <button type="submit" disabled={busy || !password.trim()} className="bg-heat flex items-center justify-center gap-2 px-4 py-3 font-display text-sm font-black uppercase text-coal-950 disabled:opacity-50">
-          {busy ? <Loader2 className="size-4 animate-spin" /> : <ShieldCheck className="size-4" />} Entrée öffnen
+          {busy ? <Loader2 className="size-4 animate-spin" /> : <ShieldCheck className="size-4" />} Log In
         </button>
         <p className="font-mono text-[10px] text-coal-500">SHORTSFACTORY_PASSWORD ist serverseitig gesetzt. Passwortschutz nie mit <code>VITE_</code> veröffentlichen.</p>
       </form>}

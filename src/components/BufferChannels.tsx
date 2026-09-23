@@ -20,7 +20,7 @@ export default function BufferChannels({ config, onChange, disabled = false }: {
   return <div className="grid gap-3">
     <div className="flex flex-wrap items-center justify-between gap-2">
       <span className="mono-label text-coal-300">BUFFER-KANÄLE</span>
-      <button type="button" onClick={load} disabled={disabled || busy} className="flex items-center gap-2 border border-coal-600 px-3 py-2 font-mono text-xs text-volt-300 disabled:opacity-50">
+      <button type="button" onClick={load} disabled={disabled || busy} className="flex min-h-[40px] items-center gap-2 border border-coal-600 px-3 py-2 font-mono text-xs text-volt-300 disabled:opacity-50">
         <RefreshCw className={`size-3 ${busy ? 'animate-spin' : ''}`} /> Kanäle laden / Verbindung prüfen
       </button>
     </div>

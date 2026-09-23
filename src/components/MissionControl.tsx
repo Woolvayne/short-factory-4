@@ -378,7 +378,9 @@ export function OutputPanel({
         ) : undefined
       }
     >
-      <div className="grid grid-cols-1 gap-2.5 min-[420px]:grid-cols-2 xl:grid-cols-5">
+      {/* 3 columns on tablets (md+) — without this, iPad landscape showed two
+          giant ~500 px wide 9:16 videos side by side. */}
+      <div className="grid grid-cols-1 gap-2.5 min-[420px]:grid-cols-2 md:grid-cols-3 xl:grid-cols-5">
         {cells.map((item, i) => {
           if (!item) {
             return (
@@ -508,7 +510,7 @@ export function OutputPanel({
                       <button
                         type="button"
                         onClick={() => onPostItems([item])}
-                        className="bg-heat flex min-h-[34px] w-full items-center justify-center gap-1.5 border border-volt-400 px-2 py-1.5 font-mono text-[9.5px] font-bold tracking-widest text-coal-950 transition-opacity hover:opacity-90"
+                        className="bg-heat flex min-h-[40px] w-full items-center justify-center gap-1.5 border border-volt-400 px-2 py-1.5 font-mono text-[9.5px] font-bold tracking-widest text-coal-950 transition-opacity hover:opacity-90"
                       >
                         <Send className="size-3" strokeWidth={2.5} /> BUFFER
                       </button>
@@ -518,7 +520,7 @@ export function OutputPanel({
                       onClick={() => onRenderOne(item.index)}
                       disabled={busy}
                       className={cn(
-                        "flex min-h-[34px] w-full items-center justify-center gap-1.5 border px-2 py-1.5 font-mono text-[9.5px] font-bold tracking-widest transition-colors disabled:opacity-40",
+                        "flex min-h-[40px] w-full items-center justify-center gap-1.5 border px-2 py-1.5 font-mono text-[9.5px] font-bold tracking-widest transition-colors disabled:opacity-40",
                         item.status === "staged"
                           ? "bg-heat border-volt-400 text-coal-950 hover:opacity-90"
                           : "border-coal-600 text-coal-300 hover:border-volt-400 hover:text-volt-300"
