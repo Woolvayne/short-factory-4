@@ -406,7 +406,7 @@ export function OutputPanel({
             <div
               key={`unit-${item.index}`}
               className={cn(
-                "group/cell relative flex min-h-[130px] flex-col justify-between border p-3 transition-all duration-300",
+                "group/cell relative flex min-h-[130px] min-w-0 flex-col justify-between overflow-hidden border p-3 transition-all duration-300",
                 item.status === "done" && "border-volt-400/60 bg-coal-850",
                 item.status === "rendering" && "border-ember-500/60 bg-coal-850",
                 item.status === "staged" && "border-coal-500 bg-coal-850",

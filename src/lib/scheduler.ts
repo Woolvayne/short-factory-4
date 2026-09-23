@@ -144,6 +144,128 @@ export function formatBerlinDateTime(isoString: string): {
   };
 }
 
+const pad2 = (n: number) => String(n).padStart(2, "0");
+
+/** Europe/Berlin civil date `YYYY-MM-DD`, or "" when the instant is invalid. */
+export function berlinDateKey(date: Date): string {
+  if (!(date instanceof Date) || Number.isNaN(date.getTime())) return "";
+  const p = getBerlinParts(date);
+  return `${p.year}-${pad2(p.month)}-${pad2(p.day)}`;
+}
+
+export interface CivilDate {
+  year: number;
+  month: number;
+  day: number;
+}
+
+export function civilDateKey(date: CivilDate): string {
+  return `${date.year}-${pad2(date.month)}-${pad2(date.day)}`;
+}
+
+/** Calendar arithmetic on civil dates — not 24h steps, so DST cannot skip a day. */
+export function addCivilDays(year: number, month: number, day: number, delta: number): CivilDate {
+  const shifted = new Date(Date.UTC(year, month - 1, day + delta));
+  return {
+    year: shifted.getUTCFullYear(),
+    month: shifted.getUTCMonth() + 1,
+    day: shifted.getUTCDate(),
+  };
+}
+
+const WEEKDAY_MON0: Record<string, number> = {
+  Mon: 0,
+  Tue: 1,
+  Wed: 2,
+  Thu: 3,
+  Fri: 4,
+  Sat: 5,
+  Sun: 6,
+};
+
+/** Monday = 0 … Sunday = 6. Noon never falls in the Europe/Berlin DST gap. */
+export function berlinWeekdayMon0(year: number, month: number, day: number): number {
+  const iso = berlinWallTimeToISO(year, month, day, 12, 0);
+  const instant = new Date(iso || Date.UTC(year, month - 1, day, 10, 0, 0));
+  const label = new Intl.DateTimeFormat("en-US", {
+    timeZone: "Europe/Berlin",
+    weekday: "short",
+  }).format(instant);
+  return WEEKDAY_MON0[label] ?? 0;
+}
+
+export type CalendarViewMode = "month" | "week" | "day";
+
+export interface BerlinCalendarDay extends CivilDate {
+  key: string;
+  /** Noon instant that falls on this Berlin civil date. */
+  instant: Date;
+}
+
+function berlinCalendarDay(year: number, month: number, day: number): BerlinCalendarDay {
+  const iso = berlinWallTimeToISO(year, month, day, 12, 0);
+  return {
+    year,
+    month,
+    day,
+    key: civilDateKey({ year, month, day }),
+    instant: new Date(iso || Date.UTC(year, month - 1, day, 10, 0, 0)),
+  };
+}
+
+/**
+ * Visible calendar days, always Europe/Berlin civil dates.
+ * Month is a Monday-aligned 6×7 grid so the last day of a 31-day month is
+ * never dropped and every column stays under Mo–So. Each key appears once.
+ */
+export function berlinCalendarDays(cursor: Date, mode: CalendarViewMode): BerlinCalendarDay[] {
+  const cursorParts = getBerlinParts(cursor);
+  if (mode === "day") return [berlinCalendarDay(cursorParts.year, cursorParts.month, cursorParts.day)];
+  if (mode === "week") {
+    const offset = berlinWeekdayMon0(cursorParts.year, cursorParts.month, cursorParts.day);
+    const monday = addCivilDays(cursorParts.year, cursorParts.month, cursorParts.day, -offset);
+    return Array.from({ length: 7 }, (_, i) => {
+      const next = addCivilDays(monday.year, monday.month, monday.day, i);
+      return berlinCalendarDay(next.year, next.month, next.day);
+    });
+  }
+  const offset = berlinWeekdayMon0(cursorParts.year, cursorParts.month, 1);
+  const start = addCivilDays(cursorParts.year, cursorParts.month, 1, -offset);
+  return Array.from({ length: 42 }, (_, i) => {
+    const next = addCivilDays(start.year, start.month, start.day, i);
+    return berlinCalendarDay(next.year, next.month, next.day);
+  });
+}
+
+/** Move the cursor by one Berlin day, week or month — never by local `setDate`. */
+export function shiftBerlinCursor(cursor: Date, mode: CalendarViewMode, direction: -1 | 1): Date {
+  const p = getBerlinParts(cursor);
+  if (mode === "month") {
+    const shifted = new Date(Date.UTC(p.year, p.month - 1 + direction, 1));
+    return berlinCalendarDay(shifted.getUTCFullYear(), shifted.getUTCMonth() + 1, 1).instant;
+  }
+  const step = mode === "week" ? direction * 7 : direction;
+  const next = addCivilDays(p.year, p.month, p.day, step);
+  return berlinCalendarDay(next.year, next.month, next.day).instant;
+}
+
+/**
+ * Posts whose Europe/Berlin civil date is exactly `dayKey`.
+ * A post is never returned for a neighbouring day, including across midnight UTC
+ * and the winter/summer offset. Invalid timestamps are dropped, not misplaced.
+ */
+export function postsOnBerlinDay<T extends { scheduledAt: string }>(
+  posts: readonly T[],
+  dayKey: string,
+): T[] {
+  if (!dayKey) return [];
+  return posts
+    .map((post, index) => ({ post, index }))
+    .filter(({ post }) => post?.scheduledAt && berlinDateKey(new Date(post.scheduledAt)) === dayKey)
+    .sort((a, b) => Date.parse(a.post.scheduledAt) - Date.parse(b.post.scheduledAt) || a.index - b.index)
+    .map(({ post }) => post);
+}
+
 /**
  * Finds the next `count` (default 10) free slots at 06:00 and 20:00 in Europe/Berlin.
  * Never overwrites or double-books any existing scheduled post.
