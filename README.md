@@ -15,9 +15,12 @@ nachgeschärft:
 
 - **Zwei-Spalten-Factory ab 768 px** — Settings + Titles links, Clip Mill +
   Soundtrack + Assembly rechts; auf dem iPad kein langes Einzel-Spalt-Scrolling mehr.
-- **Output Bay & Kalender** bekommen Tablet-Großen statt Desktop-Großen:
-  3 Spalten pro Reihe (statt 2 riesiger 9:16-Videos), Kalender in Woche = 2
-  breite Tag-Karten, Monat = 4 Spalten; die 7er-Gitter bleiben dem Desktop.
+- **Output Bay & Kalender**: Output Bay bleibt bei 3 Spalten ab 768 px.
+  Der Kalender zeigt jedes Video nur an seinem Europe/Berlin-Tag. Monat und
+  Woche sind ein fluchtendes Mo–So-Raster (6×7, damit der Monatsletzte nicht
+  fehlt); auf schmalen Screens scrollt der Monat seitlich, statt in 4 Spalten
+  umzubrechen und Freitag unter Montag zu legen. Video-Thumbnails sind absolut
+  in ihrer Zelle und können die Nachbarspalte nicht überdecken.
 - **Kein Header-Überlauf** auf iPad-Hochformat: die Status-LEDs rücken erst ab
   1024 px nach; die Navigation bekommt 36 px + Tap-Fläche.
 - **Touch-Targets** ≥ 36 px (Icons ≥ 40 px) auf allen Coarse-Pointer-Geräten,

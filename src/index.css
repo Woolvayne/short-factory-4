@@ -531,3 +531,118 @@ div[role="dialog"] {
 @media (pointer: coarse) {
   ::-webkit-scrollbar { width: 6px; height: 6px; }
 }
+
+/* ------------------------------------------------------------------ */
+/* Calendar: a video belongs to one Berlin day and cannot spill over. */
+/* ------------------------------------------------------------------ */
+
+.sf-cal-scroll {
+  max-width: 100%;
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  overscroll-behavior-x: contain;
+  -webkit-overflow-scrolling: touch;
+}
+
+.sf-cal-board {
+  min-width: 0;
+}
+
+/* Keep Mo–So aligned on narrow screens instead of wrapping into 4 columns
+   (that put Friday's video under Monday). Columns stay wide enough to read. */
+@media (max-width: 1023px) {
+  .sf-cal-board--month {
+    min-width: 868px;
+  }
+}
+
+.sf-cal-day {
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  container-type: inline-size;
+  container-name: calday;
+}
+
+.sf-cal-day video,
+.sf-cal-day img,
+.sf-cal-agenda video,
+.sf-cal-agenda img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  max-width: 100%;
+  object-fit: cover;
+  pointer-events: none;
+}
+
+.sf-cal-agenda video {
+  pointer-events: auto;
+  object-fit: contain;
+}
+
+/* Hover lift from the global button rule would slide a chip into the next day. */
+.sf-cal-day button:hover,
+.sf-cal-day a:hover,
+.sf-cal-agenda button:hover,
+.sf-day-agenda button:hover {
+  transform: none;
+}
+
+.sf-day-agenda video,
+.sf-day-agenda img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  max-width: 100%;
+  object-fit: cover;
+  pointer-events: none;
+}
+
+.sf-cal-posts {
+  min-width: 0;
+  overscroll-behavior: contain;
+}
+
+.sf-cal-posts::-webkit-scrollbar {
+  width: 4px;
+}
+
+/* Narrow day columns scroll their own posts instead of painting into the row below. */
+@container calday (max-width: 220px) {
+  .sf-cal-posts {
+    max-height: 8.75rem;
+    overflow-x: hidden;
+    overflow-y: auto;
+  }
+
+  .sf-cal-chip-status,
+  .sf-cal-empty {
+    display: none;
+  }
+}
+
+@container calday (min-width: 280px) {
+  .sf-cal-thumb {
+    width: 4.5rem;
+    height: 4.5rem;
+  }
+
+  .sf-cal-chip {
+    padding: 0.55rem 0.65rem;
+  }
+}
+
+/* Wide day cards (stacked week on tablet) keep several videos side by side
+   inside that day — never across the day boundary. */
+@container calday (min-width: 520px) {
+  .sf-cal-posts {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    max-height: none;
+    overflow: visible;
+  }
+}
